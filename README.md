@@ -1,91 +1,75 @@
 # PinScout — Setup Guide
 
 ## What you need
-- Your GitHub account: andy22-22
-- 5 minutes
+- GitHub account: andy22-22 ✅
+- Free Cloudflare account (new — 2 minutes to create)
+- Your eBay App ID: AndrewWe-pintrack-PRD-28f6186d5-8fb89236 ✅
 
 ---
 
-## Step 1: Create a GitHub Repository
+## Step 1: Upload the updated files to GitHub
 
-1. Go to **github.com** and sign in
-2. Click the **+** icon (top right) → **New repository**
-3. Name it exactly: `pintracker`
-4. Make sure it is set to **Public**
-5. Check the box: **"Add a README file"**
-6. Click **Create repository**
-
----
-
-## Step 2: Upload the App Files
-
-1. Inside your new `pintracker` repo, click **Add file** → **Upload files**
-2. Drag and drop ALL THREE files from this folder:
-   - `index.html`
-   - `manifest.json`
-   - `icon.png`
-3. Scroll down, click **Commit changes**
+1. Go to github.com/andy22-22 → your pintracker repo
+2. Click Add file → Upload files
+3. Upload BOTH: index.html and cloudflare-worker.js
+   (GitHub replaces the old index.html automatically)
+4. Click Commit changes
 
 ---
 
-## Step 3: Enable GitHub Pages
+## Step 2: Set up your free Cloudflare Worker
 
-1. In your repo, click **Settings** (top tab)
-2. Scroll down to **Pages** in the left sidebar
-3. Under "Branch", select **main** and **/ (root)**
-4. Click **Save**
-5. Wait ~60 seconds, then your app will be live at:
+WHY: eBay's API blocks direct browser requests (a browser security rule called CORS).
+The Worker runs in Cloudflare's cloud, calls eBay on your behalf, and returns the data.
+Free tier is more than enough. No credit card needed.
 
-   **https://andy22-22.github.io/pintracker/**
+2a. Go to cloudflare.com → sign up free
+
+2b. In the dashboard: Workers & Pages → Create → Create Worker
+    Name it: pinscout
+    Click Deploy
+
+2c. Click Edit code
+    Select all the placeholder code → delete it
+    Copy everything from cloudflare-worker.js → paste it in
+    Click Deploy
+
+2d. Your Worker URL will look like:
+    https://pinscout.YOURNAME.workers.dev
+    Copy this URL — you need it in Step 3.
+
+---
+
+## Step 3: Enter your credentials in PinScout
+
+1. Open https://andy22-22.github.io/pintracker/
+2. Tap Settings (⚙️)
+3. Cloudflare Proxy URL → paste your Worker URL from Step 2d
+4. eBay App ID → AndrewWe-pintrack-PRD-28f6186d5-8fb89236
+5. Tap Save Settings
+
+You should see: ✅ Connected — live eBay data enabled
+
+Now search any pin and you'll get real prices instantly!
 
 ---
 
 ## Step 4: Add to iPhone Home Screen
 
-1. Open Safari on your iPhone
-2. Go to: `https://andy22-22.github.io/pintracker/`
-3. Tap the **Share** button (box with arrow at bottom of Safari)
-4. Scroll down and tap **"Add to Home Screen"**
-5. Name it "PinScout" and tap **Add**
-
-It will now appear as an app icon on your home screen!
+Open the app URL in Safari → Share button → Add to Home Screen → Add
 
 ---
 
-## Step 5: Add your eBay API Key (when it arrives)
+## What the results show
 
-Once your eBay Developer account is approved:
-
-1. Go to **developer.ebay.com** → My Account → Application Keys
-2. Copy your **App ID (Client ID)** for the Production environment
-3. Open PinScout → tap **Settings** tab
-4. Paste your App ID and tap **Save Settings**
-
-This unlocks automatic price fetching directly in the app.
-
-**Until then:** The app will show direct links to eBay search results for any pin you search — you can view sold prices manually on eBay while you wait.
+- Median estimated value (based on recent sold prices)
+- Average sold price + average listed price
+- Price distribution chart
+- Up to 10 recent sold listings with dates (tap any to open on eBay)
+- Up to 8 current active listings
+- HIGH/LOW tags on outlier prices
 
 ---
 
-## How to Use
-
-### Text Search
-1. Type a pin name (e.g. "Haunted Mansion stretching room 2023")
-2. Tap **Search eBay Prices**
-3. See estimated value, sold history, and active listings
-
-### Image Search
-1. Tap the 📷 camera icon
-2. Choose **Take Photo** or **Choose from Library**
-3. Optionally open **Google Lens** to identify the pin name first
-4. Edit the search term if needed, then tap Search
-
-### History
-- Every search is automatically saved
-- Tap any history entry to re-run that search
-- Tap 🗑 to delete individual entries
-
----
-
-## Your App URL
+## App URL
 https://andy22-22.github.io/pintracker/

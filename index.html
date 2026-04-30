@@ -751,15 +751,22 @@
     <div class="settings-body">
 
       <div class="settings-section">
-        <div class="settings-section-title">eBay API (Optional)</div>
+        <div class="settings-section-title">eBay Connection</div>
         <div class="settings-row">
-          <label>App ID (Client ID)</label>
-          <input class="settings-input" id="ebay-app-id" type="text"
-            placeholder="e.g. AndySmit-PinSc-PRD-xxxx" autocomplete="off" />
+          <label>Cloudflare Proxy URL</label>
+          <input class="settings-input" id="proxy-url" type="url"
+            placeholder="https://pinscout.YOUR-NAME.workers.dev" autocomplete="off" />
           <div class="settings-note">
-            Unlocks 3-year sold price history. Get your free key at
-            <a href="https://developer.ebay.com" target="_blank">developer.ebay.com</a>
-            once approved. Without it, the app uses eBay's public 90-day data.
+            Required to fetch live eBay data. Set up your free proxy in ~3 minutes —
+            see the <strong style="color:var(--text)">Setup Guide</strong> in the README for exact steps.
+          </div>
+        </div>
+        <div class="settings-row">
+          <label>eBay App ID (Client ID)</label>
+          <input class="settings-input" id="ebay-app-id" type="text"
+            placeholder="e.g. AndrewWe-pintrack-PRD-xxxx" autocomplete="off" />
+          <div class="settings-note">
+            Your eBay Developer App ID. Already have it? Paste it here.
           </div>
           <div id="api-status"></div>
         </div>
@@ -852,23 +859,29 @@ function loadSettings() {
   try {
     settings = JSON.parse(localStorage.getItem('pinscout_settings') || '{}');
   } catch(e) { settings = {}; }
-  if (settings.ebayAppId) {
-    document.getElementById('ebay-app-id').value = settings.ebayAppId;
-    document.getElementById('api-status').innerHTML =
-      '<div class="status-pill ok"><span class="status-dot"></span>API key saved</div>';
-  }
+  if (settings.ebayAppId) document.getElementById('ebay-app-id').value = settings.ebayAppId;
+  if (settings.proxyUrl) document.getElementById('proxy-url').value = settings.proxyUrl;
+  updateApiStatus();
   updateHistoryCount();
+}
+
+function updateApiStatus() {
+  const statusEl = document.getElementById('api-status');
+  if (!statusEl) return;
+  if (settings.proxyUrl && settings.ebayAppId) {
+    statusEl.innerHTML = '<div class="status-pill ok"><span class="status-dot"></span>Connected — live eBay data enabled</div>';
+  } else if (settings.proxyUrl || settings.ebayAppId) {
+    statusEl.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>Partially set up — need both Proxy URL and App ID</div>';
+  } else {
+    statusEl.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>Not connected — see setup guide</div>';
+  }
 }
 
 function saveSettings() {
   settings.ebayAppId = document.getElementById('ebay-app-id').value.trim();
+  settings.proxyUrl  = document.getElementById('proxy-url').value.trim().replace(/\/$/, '');
   localStorage.setItem('pinscout_settings', JSON.stringify(settings));
-  const statusEl = document.getElementById('api-status');
-  if (settings.ebayAppId) {
-    statusEl.innerHTML = '<div class="status-pill ok"><span class="status-dot"></span>API key saved</div>';
-  } else {
-    statusEl.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>No key — using public data</div>';
-  }
+  updateApiStatus();
   showToast('Settings saved ✓');
 }
 
@@ -961,122 +974,75 @@ function removeImage() {
 async function doSearch() {
   const query = document.getElementById('search-input').value.trim();
   if (!query && !currentImage) return;
-
   const searchTerm = query || 'Disney pin';
   showLoading();
-
   try {
-    if (settings.ebayAppId) {
-      await searchWithAPI(searchTerm);
+    if (settings.proxyUrl && settings.ebayAppId) {
+      await searchViaProxy(searchTerm);
     } else {
-      await searchPublicEbay(searchTerm);
+      displayResults(searchTerm, [], []);
+      saveToHistory(searchTerm, null, 0);
     }
   } catch(err) {
-    showError(err.message);
+    console.error(err);
+    showError(searchTerm, err.message);
   }
 }
 
-// ── PUBLIC eBay search (no API key needed) ──
-// Uses eBay's browse endpoint which allows CORS for public data
-async function searchPublicEbay(query) {
-  const ebayQuery = encodeURIComponent(query + ' Disney pin');
-
-  // Fetch active listings via eBay browse API (public, CORS-enabled)
-  let activeListings = [];
-  let soldListings = [];
-
-  try {
-    const url = `https://svcs.ebay.com/services/search/FindingService/v1?OPERATION-NAME=findCompletedItems&SERVICE-VERSION=1.0.0&SECURITY-APPNAME=AndrewSm-PinScout-PRD-placeholder&RESPONSE-DATA-FORMAT=JSON&REST-PAYLOAD&keywords=${ebayQuery}&categoryId=66522&paginationInput.entriesPerPage=20&itemFilter(0).name=SoldItemsOnly&itemFilter(0).value=true&sortOrder=EndTimeSoonest`;
-
-    // Since we may not have an API key yet, use the eBay search URL approach
-    // and parse what we can, supplemented by estimated data
-    soldListings = await fetchEbayCompleted(query);
-    activeListings = await fetchEbayActive(query);
-  } catch(e) {
-    console.warn('eBay fetch error:', e);
-  }
-
-  // Build results even if partial
-  displayResults(query, soldListings, activeListings);
-
-  // Save to history
-  const value = estimateValue(soldListings);
-  saveToHistory(query, value, soldListings.length);
+async function searchViaProxy(query) {
+  const [sold, active] = await Promise.allSettled([
+    fetchViaProxy(query, true),
+    fetchViaProxy(query, false)
+  ]);
+  const soldItems   = sold.status   === 'fulfilled' ? sold.value   : [];
+  const activeItems = active.status === 'fulfilled' ? active.value : [];
+  displayResults(query, soldItems, activeItems);
+  const value = estimateValue(soldItems);
+  saveToHistory(query, value, soldItems.length);
 }
 
-async function fetchEbayCompleted(query) {
-  // Use eBay's public finding API for completed items
-  const appId = settings.ebayAppId || 'AndrewSm-PinScout-PRD-00000000-xxxxxxxx'; // placeholder
+async function fetchViaProxy(query, completedOnly) {
   const encodedQuery = encodeURIComponent(query + ' Disney pin');
-  const url = `https://svcs.ebay.com/services/search/FindingService/v1` +
-    `?OPERATION-NAME=findCompletedItems` +
-    `&SERVICE-VERSION=1.0.0` +
-    `&SECURITY-APPNAME=${appId}` +
-    `&RESPONSE-DATA-FORMAT=JSON` +
-    `&keywords=${encodedQuery}` +
-    `&categoryId=66522` +
-    `&paginationInput.entriesPerPage=20` +
-    `&itemFilter(0).name=SoldItemsOnly&itemFilter(0).value=true` +
-    `&sortOrder=EndTimeSoonest`;
+  const operation = completedOnly ? 'findCompletedItems' : 'findItemsByKeywords';
+  let params = `OPERATION-NAME=${operation}&SERVICE-VERSION=1.0.0` +
+    `&SECURITY-APPNAME=${settings.ebayAppId}` +
+    `&RESPONSE-DATA-FORMAT=JSON&REST-PAYLOAD` +
+    `&keywords=${encodedQuery}&categoryId=66522` +
+    `&paginationInput.entriesPerPage=${completedOnly ? 30 : 10}` +
+    `&sortOrder=${completedOnly ? 'EndTimeSoonest' : 'BestMatch'}`;
+  if (completedOnly) params += `&itemFilter(0).name=SoldItemsOnly&itemFilter(0).value=true`;
 
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error('eBay API unavailable');
+  const targetUrl = `https://svcs.ebay.com/services/search/FindingService/v1?${params}`;
+  const proxyUrl  = `${settings.proxyUrl}?url=${encodeURIComponent(targetUrl)}`;
+
+  const resp = await fetch(proxyUrl);
+  if (!resp.ok) throw new Error(`Proxy returned ${resp.status}`);
   const data = await resp.json();
-  const items = data?.findCompletedItemsResponse?.[0]?.searchResult?.[0]?.item || [];
+
+  const key   = completedOnly ? 'findCompletedItemsResponse' : 'findItemsByKeywordsResponse';
+  const items = data?.[key]?.[0]?.searchResult?.[0]?.item || [];
   return items.map(item => ({
-    title: item.title?.[0] || '',
-    price: parseFloat(item.sellingStatus?.[0]?.currentPrice?.[0]?.__value__ || 0),
-    date: item.listingInfo?.[0]?.endTime?.[0] || '',
-    url: item.viewItemURL?.[0] || '',
-    sold: true,
+    title:     item.title?.[0] || '',
+    price:     parseFloat(item.sellingStatus?.[0]?.currentPrice?.[0]?.__value__ || 0),
+    date:      completedOnly
+                 ? (item.listingInfo?.[0]?.endTime?.[0] || '')
+                 : (item.listingInfo?.[0]?.startTime?.[0] || ''),
+    url:       item.viewItemURL?.[0] || '',
+    sold:      completedOnly,
     condition: item.condition?.[0]?.conditionDisplayName?.[0] || ''
   })).filter(i => i.price > 0);
-}
-
-async function fetchEbayActive(query) {
-  const appId = settings.ebayAppId || 'AndrewSm-PinScout-PRD-00000000-xxxxxxxx';
-  const encodedQuery = encodeURIComponent(query + ' Disney pin');
-  const url = `https://svcs.ebay.com/services/search/FindingService/v1` +
-    `?OPERATION-NAME=findItemsIneBayStores` +
-    `&SERVICE-VERSION=1.0.0` +
-    `&SECURITY-APPNAME=${appId}` +
-    `&RESPONSE-DATA-FORMAT=JSON` +
-    `&keywords=${encodedQuery}` +
-    `&categoryId=66522` +
-    `&paginationInput.entriesPerPage=10` +
-    `&sortOrder=BestMatch`;
-
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) return [];
-    const data = await resp.json();
-    const items = data?.findItemsIneBayStoresResponse?.[0]?.searchResult?.[0]?.item || [];
-    return items.map(item => ({
-      title: item.title?.[0] || '',
-      price: parseFloat(item.sellingStatus?.[0]?.currentPrice?.[0]?.__value__ || 0),
-      date: item.listingInfo?.[0]?.startTime?.[0] || '',
-      url: item.viewItemURL?.[0] || '',
-      sold: false,
-      condition: item.condition?.[0]?.conditionDisplayName?.[0] || ''
-    })).filter(i => i.price > 0);
-  } catch(e) { return []; }
-}
-
-async function searchWithAPI(query) {
-  // Full API search with provided App ID
-  const sold = await fetchEbayCompleted(query);
-  const active = await fetchEbayActive(query);
-  displayResults(query, sold, active);
-  const value = estimateValue(sold);
-  saveToHistory(query, value, sold.length);
 }
 
 function estimateValue(soldItems) {
   if (!soldItems.length) return null;
   const prices = soldItems.map(i => i.price).sort((a,b) => a - b);
-  // Use median of recent sold prices
   const mid = Math.floor(prices.length / 2);
   return prices.length % 2 !== 0 ? prices[mid] : (prices[mid-1] + prices[mid]) / 2;
+}
+
+function calcAverage(items) {
+  if (!items.length) return 0;
+  return items.reduce((s, i) => s + i.price, 0) / items.length;
 }
 
 // ══════════════════════════════════════
@@ -1087,84 +1053,125 @@ function displayResults(query, sold, active) {
   const hasData = sold.length > 0 || active.length > 0;
 
   if (!hasData) {
-    // No API key yet — show direct eBay links as fallback
-    area.innerHTML = buildNoAPIFallback(query);
+    area.innerHTML = buildSetupPrompt(query);
     return;
   }
 
-  const value = estimateValue(sold);
-  const prices = sold.map(i => i.price);
-  const minP = prices.length ? Math.min(...prices) : 0;
-  const maxP = prices.length ? Math.max(...prices) : 0;
-  const avgP = prices.length ? prices.reduce((a,b) => a+b,0) / prices.length : 0;
-  const confidence = Math.min(100, sold.length * 10);
+  const value    = estimateValue(sold);
+  const prices   = sold.map(i => i.price);
+  const minP     = prices.length ? Math.min(...prices) : 0;
+  const maxP     = prices.length ? Math.max(...prices) : 0;
+  const avgSold  = calcAverage(sold);
+  const avgActive= calcAverage(active);
+  const confidence = Math.min(100, sold.length * 7);
+
+  // Price distribution buckets for mini histogram
+  const buckets = buildBuckets(prices);
 
   let html = '';
 
-  // Value card
+  // ── Value card ──
   html += `<div class="section-label">Estimated Value</div>`;
   html += `<div class="value-card">
     <div class="value-pin-name">${escHtml(query)}</div>
-    <div class="value-meta">Based on ${sold.length} recent sold listing${sold.length !== 1 ? 's' : ''}</div>
+    <div class="value-meta">Median of ${sold.length} recent sold listing${sold.length!==1?'s':''}</div>
     <div class="value-main">
-      <div class="value-price">${value ? '$' + value.toFixed(2) : '—'}</div>
-      <div class="value-label">Est. value</div>
+      <div class="value-price">${value ? '$'+value.toFixed(2) : '—'}</div>
+      <div class="value-label">Median sold</div>
     </div>
-    ${minP && maxP ? `<div class="value-range">Range: <span>$${minP.toFixed(2)}</span> — <span>$${maxP.toFixed(2)}</span></div>` : ''}
+    ${minP&&maxP ? `<div class="value-range">Range: <span>$${minP.toFixed(2)}</span> — <span>$${maxP.toFixed(2)}</span></div>` : ''}
     <div class="confidence-bar-wrap">
       <div class="confidence-bar" style="width:${confidence}%"></div>
     </div>
-    <div class="confidence-label">Confidence: ${confidence < 30 ? 'Low' : confidence < 70 ? 'Medium' : 'High'} (${sold.length} sales)</div>
+    <div class="confidence-label">Confidence: ${confidence<30?'Low':confidence<70?'Medium':'High'} (${sold.length} data points)</div>
   </div>`;
 
-  // Stats row
-  if (sold.length > 0) {
-    html += `<div class="stats-row">
-      <div class="stat-chip"><span class="stat-chip-val">${sold.length}</span><span class="stat-chip-lbl">Sold</span></div>
-      <div class="stat-chip"><span class="stat-chip-val">${active.length}</span><span class="stat-chip-lbl">Listed</span></div>
-      <div class="stat-chip"><span class="stat-chip-val">$${avgP.toFixed(0)}</span><span class="stat-chip-lbl">Avg Sold</span></div>
-    </div>`;
-  }
+  // ── Stats row: sold count / avg sold / avg listed ──
+  html += `<div class="stats-row">
+    <div class="stat-chip">
+      <span class="stat-chip-val">${sold.length}</span>
+      <span class="stat-chip-lbl">Sold (90d)</span>
+    </div>
+    <div class="stat-chip">
+      <span class="stat-chip-val" style="color:var(--green)">${avgSold ? '$'+avgSold.toFixed(2) : '—'}</span>
+      <span class="stat-chip-lbl">Avg Sold</span>
+    </div>
+    <div class="stat-chip">
+      <span class="stat-chip-val" style="color:var(--teal)">${avgActive ? '$'+avgActive.toFixed(2) : '—'}</span>
+      <span class="stat-chip-lbl">Avg Listed</span>
+    </div>
+  </div>`;
 
-  // Sold listings
-  if (sold.length > 0) {
-    html += `<div class="section-label">Recently Sold</div>`;
-    html += `<div class="value-card" style="padding:8px 14px">`;
-    sold.slice(0, 8).forEach(item => {
-      const d = item.date ? new Date(item.date).toLocaleDateString('en-US', {month:'short', day:'numeric', year:'2-digit'}) : '';
-      html += `<div class="listing-row">
-        <div class="listing-dot dot-sold"></div>
-        <div class="listing-info">
-          <div class="listing-title">${escHtml(item.title.replace(/disney\s+pin\s*/gi, '').substring(0,60))}</div>
-          ${d ? `<div class="listing-date">${d}${item.condition ? ' · ' + item.condition : ''}</div>` : ''}
-        </div>
-        <div class="listing-price sold-price">$${item.price.toFixed(2)}</div>
+  // ── Price distribution ──
+  if (buckets.length > 1) {
+    html += `<div class="section-label" style="margin-top:6px">Price Distribution</div>`;
+    html += `<div class="value-card" style="padding:14px 16px">`;
+    html += `<div style="display:flex;align-items:flex-end;gap:4px;height:44px;margin-bottom:6px">`;
+    const maxCount = Math.max(...buckets.map(b=>b.count));
+    buckets.forEach(b => {
+      const h = maxCount ? Math.max(4, Math.round((b.count/maxCount)*44)) : 4;
+      html += `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px">
+        <div style="width:100%;height:${h}px;background:var(--gold);border-radius:3px 3px 0 0;opacity:${0.4+0.6*(b.count/maxCount)}"></div>
       </div>`;
     });
     html += `</div>`;
+    html += `<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-dim);font-family:'DM Mono',monospace">`;
+    html += `<span>$${minP.toFixed(0)}</span><span>$${maxP.toFixed(0)}</span>`;
+    html += `</div></div>`;
   }
 
-  // Active listings
-  if (active.length > 0) {
-    html += `<div class="section-label" style="margin-top:14px">Active Listings</div>`;
+  // ── Sold listings ──
+  if (sold.length > 0) {
+    html += `<div class="section-label" style="margin-top:6px">Recently Sold <span style="color:var(--green);margin-left:4px">● ${sold.length} results</span></div>`;
     html += `<div class="value-card" style="padding:8px 14px">`;
-    active.slice(0, 5).forEach(item => {
-      html += `<div class="listing-row">
+    sold.slice(0, 10).forEach(item => {
+      const d = item.date ? new Date(item.date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}) : '';
+      const isHigh = value && item.price > value * 1.3;
+      const isLow  = value && item.price < value * 0.7;
+      html += `<div class="listing-row" ${item.url?`onclick="window.open('${escAttr(item.url)}','_blank')" style="cursor:pointer"`:''}>
+        <div class="listing-dot dot-sold"></div>
+        <div class="listing-info">
+          <div class="listing-title">${escHtml(item.title.substring(0,58))}</div>
+          ${d?`<div class="listing-date">${d}${item.condition?' · '+item.condition:''}</div>`:''}
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">
+          <div class="listing-price sold-price">$${item.price.toFixed(2)}</div>
+          ${isHigh?'<div style="font-size:9px;color:var(--gold);font-family:\'DM Mono\',monospace">HIGH</div>':''}
+          ${isLow ?'<div style="font-size:9px;color:var(--teal);font-family:\'DM Mono\',monospace">LOW</div>' :''}
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+    // Average row below sold
+    html += `<div style="display:flex;justify-content:flex-end;padding:4px 4px 0;font-size:12px;color:var(--text-dim)">
+      Average sold: <span style="color:var(--green);margin-left:6px;font-family:'DM Mono',monospace">$${avgSold.toFixed(2)}</span>
+    </div>`;
+  }
+
+  // ── Active listings ──
+  if (active.length > 0) {
+    html += `<div class="section-label" style="margin-top:14px">Currently Listed <span style="color:var(--teal);margin-left:4px">● ${active.length} results</span></div>`;
+    html += `<div class="value-card" style="padding:8px 14px">`;
+    active.slice(0, 8).forEach(item => {
+      html += `<div class="listing-row" ${item.url?`onclick="window.open('${escAttr(item.url)}','_blank')" style="cursor:pointer"`:''}>
         <div class="listing-dot dot-active"></div>
         <div class="listing-info">
-          <div class="listing-title">${escHtml(item.title.substring(0,60))}</div>
-          ${item.condition ? `<div class="listing-date">${item.condition}</div>` : ''}
+          <div class="listing-title">${escHtml(item.title.substring(0,58))}</div>
+          ${item.condition?`<div class="listing-date">${item.condition}</div>`:''}
         </div>
         <div class="listing-price active-price">$${item.price.toFixed(2)}</div>
       </div>`;
     });
     html += `</div>`;
+    html += `<div style="display:flex;justify-content:flex-end;padding:4px 4px 0;font-size:12px;color:var(--text-dim)">
+      Average listed: <span style="color:var(--teal);margin-left:6px;font-family:'DM Mono',monospace">$${avgActive.toFixed(2)}</span>
+    </div>`;
   }
 
-  // eBay link
-  const ebaySearchUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query + ' Disney pin')}&_sacat=66522&LH_Complete=1&LH_Sold=1`;
-  html += `<a href="${ebaySearchUrl}" target="_blank" class="ebay-link">
-    <span>🛍</span> View all sold listings on eBay →
+  // ── eBay deep link ──
+  const ebayUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query+' Disney pin')}&_sacat=66522&LH_Complete=1&LH_Sold=1`;
+  html += `<a href="${ebayUrl}" target="_blank" class="ebay-link" style="margin-top:14px">
+    🛍 View all on eBay →
   </a>`;
 
   // Save button
@@ -1176,30 +1183,39 @@ function displayResults(query, sold, active) {
   currentResults = { query, value, sold, active };
 }
 
-function buildNoAPIFallback(query) {
-  const soldUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query + ' Disney pin')}&_sacat=66522&LH_Complete=1&LH_Sold=1`;
-  const activeUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query + ' Disney pin')}&_sacat=66522`;
-  const lensUrl = `https://lens.google.com`;
+function buildBuckets(prices) {
+  if (prices.length < 2) return [];
+  const min = Math.min(...prices), max = Math.max(...prices);
+  if (min === max) return [];
+  const n = Math.min(8, prices.length);
+  const size = (max - min) / n;
+  const buckets = Array.from({length: n}, (_,i) => ({ from: min+i*size, to: min+(i+1)*size, count: 0 }));
+  prices.forEach(p => {
+    const i = Math.min(n-1, Math.floor((p-min)/size));
+    buckets[i].count++;
+  });
+  return buckets;
+}
 
+function buildSetupPrompt(query) {
+  const soldUrl   = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query+' Disney pin')}&_sacat=66522&LH_Complete=1&LH_Sold=1`;
+  const activeUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query+' Disney pin')}&_sacat=66522`;
+  const needsProxy = !settings.proxyUrl;
+  const needsKey   = !settings.ebayAppId;
   return `
     <div class="value-card">
-      <div class="value-pin-name">eBay API Key Needed</div>
-      <div class="value-meta" style="margin-bottom:14px">
-        To pull prices automatically, add your eBay Developer App ID in Settings.<br/><br/>
-        Until then, tap the links below to search eBay manually:
+      <div class="value-pin-name" style="margin-bottom:10px">⚙️ Setup Required</div>
+      <div class="value-meta" style="margin-bottom:14px;line-height:1.7">
+        ${needsProxy ? '• Add your <strong style="color:var(--text)">Cloudflare Proxy URL</strong> in Settings<br/>' : ''}
+        ${needsKey   ? '• Add your <strong style="color:var(--text)">eBay App ID</strong> in Settings<br/>' : ''}
+        <br/>See the README setup guide for step-by-step instructions.
       </div>
-      <a href="${soldUrl}" target="_blank" class="ebay-link" style="margin-top:0;margin-bottom:8px">
-        🟢 View sold listings for "${escHtml(query)}" →
-      </a>
-      <a href="${activeUrl}" target="_blank" class="ebay-link" style="margin-top:0">
-        🔵 View active listings for "${escHtml(query)}" →
-      </a>
-      <div style="margin-top:14px;font-size:12px;color:var(--text-dim);line-height:1.6">
-        💡 <strong style="color:var(--text)">Once your eBay API key arrives</strong>, add it in Settings and all prices will load automatically here.
-      </div>
+      <button class="btn-primary" style="margin-bottom:10px" onclick="showTab('settings')">Open Settings →</button>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px">In the meantime, view manually on eBay:</div>
+      <a href="${soldUrl}"   target="_blank" class="ebay-link" style="margin-top:0;margin-bottom:8px">🟢 Sold listings for "${escHtml(query)}" →</a>
+      <a href="${activeUrl}" target="_blank" class="ebay-link" style="margin-top:0">🔵 Active listings for "${escHtml(query)}" →</a>
     </div>
-    <button class="save-btn" onclick="saveCurrentSearchManual('${escHtml(query)}')">📌 Save this search</button>
-  `;
+    <button class="save-btn" onclick="saveCurrentSearchManual('${escAttr(query)}')">📌 Save this search</button>`;
 }
 
 function showLoading() {
@@ -1210,9 +1226,13 @@ function showLoading() {
     </div>`;
 }
 
-function showError(msg) {
-  const query = document.getElementById('search-input').value.trim();
-  document.getElementById('results-area').innerHTML = buildNoAPIFallback(query);
+function showError(query, msg) {
+  document.getElementById('results-area').innerHTML = `
+    <div class="value-card">
+      <div class="value-pin-name" style="margin-bottom:8px">⚠️ Search Error</div>
+      <div class="settings-note" style="margin-bottom:12px">${escHtml(msg||'Unknown error')}.<br/><br/>Check your Proxy URL and App ID in Settings.</div>
+      <button class="btn-primary" style="margin-bottom:0" onclick="showTab('settings')">Open Settings →</button>
+    </div>`;
 }
 
 // ══════════════════════════════════════
