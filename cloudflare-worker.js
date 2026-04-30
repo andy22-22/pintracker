@@ -1,9 +1,9 @@
 /**
- * PinScout — eBay Proxy Worker v3
+ * PinScout — eBay Proxy Worker v4
  * Service Worker syntax for Cloudflare dashboard editor.
  *
- * SOLD DATA: Scrapes eBay's public completed/sold listings page directly.
- * No special API access needed — same data as the "View all on eBay" button.
+ * SOLD DATA: Scrapes eBay's public completed/sold listings page.
+ * Uses multiple parsing strategies for reliability.
  *
  * ACTIVE LISTINGS: Uses eBay Browse API (OAuth).
  *
@@ -60,7 +60,8 @@ async function scrapeSoldListings(query) {
   const searchTerm = query.toLowerCase().includes('disney') ? query : query + ' Disney pin';
   const encoded    = encodeURIComponent(searchTerm);
 
-  const pageUrls = [1, 2, 3].map(p =>
+  // Fetch 2 pages in parallel (eBay shows ~60 items per page)
+  const pageUrls = [1, 2].map(p =>
     `https://www.ebay.com/sch/i.html?_nkw=${encoded}&LH_Complete=1&LH_Sold=1&_sop=13&_ipg=60&_pgn=${p}`
   );
 
@@ -69,12 +70,12 @@ async function scrapeSoldListings(query) {
 
   for (const result of pages) {
     if (result.status === 'fulfilled' && result.value) {
-      const items = parseSoldListingsHtml(result.value);
+      const items = parseEbayHtml(result.value);
       allItems = allItems.concat(items);
-      if (items.length === 0) break;
     }
   }
 
+  // Dedupe by URL
   const seen = new Set();
   allItems = allItems.filter(i => {
     if (!i.url || seen.has(i.url)) return false;
@@ -82,86 +83,174 @@ async function scrapeSoldListings(query) {
     return true;
   });
 
-  return { items: allItems.slice(0, 100), total: allItems.length, source: 'ebay_scrape' };
+  // Sort by date descending
+  allItems.sort((a, b) => {
+    if (!a.date && !b.date) return 0;
+    if (!a.date) return 1;
+    if (!b.date) return -1;
+    return new Date(b.date) - new Date(a.date);
+  });
+
+  return {
+    items: allItems.slice(0, 100),
+    total: allItems.length,
+    source: 'ebay_scrape',
+    debug: `Fetched ${allItems.length} items from ${pages.filter(p=>p.status==='fulfilled').length} pages`
+  };
 }
 
 async function fetchEbayPage(url) {
   const resp = await fetch(url, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.5',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Cache-Control': 'no-cache',
     }
   });
   if (!resp.ok) return null;
   return await resp.text();
 }
 
-function parseSoldListingsHtml(html) {
+function parseEbayHtml(html) {
+  // Strategy 1: Try JSON-LD structured data first (most reliable)
+  const jsonItems = parseJsonLd(html);
+  if (jsonItems.length > 0) return jsonItems;
+
+  // Strategy 2: Parse HTML item blocks
+  return parseHtmlBlocks(html);
+}
+
+function parseJsonLd(html) {
   const items = [];
-  const listingRegex = /<li[^>]+class="[^"]*s-item[^"]*"[^>]*>([\s\S]*?)<\/li>/g;
-  let match;
+  // eBay sometimes embeds product data as JSON-LD
+  const jsonLdRegex = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/g;
+  let m;
+  while ((m = jsonLdRegex.exec(html)) !== null) {
+    try {
+      const data = JSON.parse(m[1]);
+      const list = Array.isArray(data) ? data : (data['@graph'] || [data]);
+      for (const item of list) {
+        if (item['@type'] === 'Product' || item['@type'] === 'Offer') {
+          const price = parseFloat(item.offers?.price || item.price || 0);
+          if (price > 0) {
+            items.push({
+              title: item.name || item.offers?.name || '',
+              price,
+              currency: item.offers?.priceCurrency || 'USD',
+              pricingUsd: price,
+              date: item.offers?.priceValidUntil || '',
+              url: item.offers?.url || item.url || '',
+              image: item.image || (Array.isArray(item.image) ? item.image[0] : '') || '',
+              condition: item.offers?.itemCondition?.replace('http://schema.org/','') || '',
+              marketplace: 'EBAY_US',
+              sold: true
+            });
+          }
+        }
+      }
+    } catch(e) {}
+  }
+  return items;
+}
 
-  while ((match = listingRegex.exec(html)) !== null) {
-    const block = match[1];
-    if (block.includes('s-item__placeholder') || block.includes('SHOP_ON_EBAY')) continue;
+function parseHtmlBlocks(html) {
+  const items = [];
 
-    // Title
-    const titleMatch = block.match(/class="s-item__title[^"]*"[^>]*>(?:<span[^>]*>[^<]*<\/span>)?\s*([\s\S]*?)<\/(?:h3|span|div|a)>/);
-    const title = titleMatch ? cleanText(titleMatch[1]) : '';
+  // Split on s-item boundaries — more reliable than greedy regex
+  // eBay wraps each result in a <li class="s-item ...">
+  const parts = html.split(/(?=<li[^>]+class="[^"]*\bs-item\b)/);
+
+  for (const block of parts) {
+    if (!block.includes('s-item__price')) continue;
+    if (block.includes('SHOP_ON_EBAY') || block.includes('s-item__placeholder')) continue;
+
+    // Title: look for s-item__title content
+    let title = '';
+    const titleM = block.match(/class="s-item__title"[^>]*>([\s\S]*?)(?:<\/h3>|<\/span>|<\/div>)/);
+    if (titleM) {
+      title = stripTags(titleM[1]).trim();
+      // eBay puts "New listing" as a span inside — remove it
+      title = title.replace(/^New listing\s*/i, '').trim();
+    }
     if (!title || title.length < 3) continue;
 
-    // Price
-    const priceMatch = block.match(/class="s-item__price"[^>]*>[\s\S]*?(\$[\d,]+\.?\d*)/);
-    const price = parseFloat((priceMatch ? priceMatch[1] : '').replace(/[$,]/g, ''));
+    // Price: match $ amount
+    let price = 0;
+    const priceM = block.match(/class="s-item__price"[^>]*>[\s\S]*?\$([\d,]+\.?\d*)/);
+    if (priceM) price = parseFloat(priceM[1].replace(/,/g, ''));
     if (!price || price <= 0) continue;
 
     // URL
-    const urlMatch = block.match(/href="(https:\/\/www\.ebay\.com\/itm\/[^"?]+)/);
-    const url = urlMatch ? urlMatch[1] : '';
+    let url = '';
+    const urlM = block.match(/href="(https:\/\/www\.ebay\.com\/itm\/[^?"#]+)/);
+    if (urlM) url = urlM[1];
 
-    // Image — prefer larger size
-    const imgMatch = block.match(/<img[^>]+(?:src|data-src)="(https:\/\/i\.ebayimg\.com\/[^"]+)"/);
-    let image = imgMatch ? imgMatch[1] : '';
-    if (image) image = image.replace(/\/s-l\d+\./, '/s-l400.');
-
-    // Sold date
-    const dateMatch = block.match(/class="[^"]*s-item__ended-date[^"]*"[^>]*>([\s\S]*?)<\/span>/);
-    let dateStr = dateMatch ? cleanText(dateMatch[1]) : '';
-    if (!dateStr) {
-      const d2 = block.match(/Sold\s+(\w+\s+\d+,\s+\d{4})/i);
-      if (d2) dateStr = d2[1];
+    // Image — try data-src first (lazy-loaded), then src
+    let image = '';
+    const imgM = block.match(/<img[^>]+class="s-item__image-img[^"]*"[^>]*>/);
+    if (imgM) {
+      const srcM = imgM[0].match(/(?:data-src|src)="(https:\/\/i\.ebayimg\.com\/[^"]+)"/);
+      if (srcM) image = srcM[1].replace(/\/s-l\d+\./, '/s-l400.');
     }
-    const date = dateStr ? parseDateStr(dateStr) : '';
+    // Fallback: any ebayimg URL in the block
+    if (!image) {
+      const anyImg = block.match(/https:\/\/i\.ebayimg\.com\/thumbs\/[^"'\s]+/);
+      if (anyImg) image = anyImg[0].replace(/\/s-l\d+\./, '/s-l400.');
+    }
+
+    // Date — eBay shows sold date in s-item__ended-date or as "Sold  MMM DD, YYYY"
+    let date = '';
+    const datePatterns = [
+      /class="[^"]*s-item__ended-date[^"]*"[^>]*>([\s\S]*?)<\/span>/,
+      /class="[^"]*s-item__endedDate[^"]*"[^>]*>([\s\S]*?)<\/span>/,
+      /Sold\s+(\w{3}\s+\d{1,2},?\s+\d{4})/i,
+      /(\d{1,2}\s+\w{3}\s+\d{4})/,
+    ];
+    for (const pat of datePatterns) {
+      const dm = block.match(pat);
+      if (dm) {
+        const raw = stripTags(dm[1]).trim();
+        const parsed = new Date(raw);
+        if (!isNaN(parsed)) { date = parsed.toISOString(); break; }
+        // Try "X days ago"
+        const ago = raw.match(/(\d+)\s+days?\s+ago/i);
+        if (ago) {
+          const d = new Date(); d.setDate(d.getDate() - parseInt(ago[1]));
+          date = d.toISOString(); break;
+        }
+      }
+    }
 
     // Condition
-    const condMatch = block.match(/class="SECONDARY_INFO"[^>]*>([\s\S]*?)<\/span>/);
-    const condition = condMatch ? cleanText(condMatch[1]) : '';
+    let condition = '';
+    const condM = block.match(/class="SECONDARY_INFO"[^>]*>([\s\S]*?)<\/span>/);
+    if (condM) condition = stripTags(condM[1]).trim();
 
-    items.push({ title, price, currency: 'USD', pricingUsd: price, date, url, image, condition, marketplace: 'EBAY_US', sold: true });
+    items.push({
+      title,
+      price,
+      currency: 'USD',
+      pricingUsd: price,
+      date,
+      url,
+      image,
+      condition,
+      marketplace: 'EBAY_US',
+      sold: true
+    });
   }
 
   return items;
 }
 
-function cleanText(html) {
+function stripTags(html) {
   return html
     .replace(/<[^>]+>/g, ' ')
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
     .replace(/\s+/g, ' ').trim();
-}
-
-function parseDateStr(str) {
-  if (!str) return '';
-  const d = new Date(str);
-  if (!isNaN(d.getTime())) return d.toISOString();
-  const daysAgo = str.match(/(\d+)\s+days?\s+ago/i);
-  if (daysAgo) {
-    const dt = new Date();
-    dt.setDate(dt.getDate() - parseInt(daysAgo[1]));
-    return dt.toISOString();
-  }
-  return str;
 }
 
 // ══════════════════════════════════════════════════════
@@ -204,17 +293,26 @@ async function fetchActiveFromMarket(token, searchTerm, marketplace) {
   const data = await resp.json();
   const rates = { USD: 1, GBP: 1.27, AUD: 0.65, EUR: 1.08, CAD: 0.73 };
   return (data.itemSummaries || []).map(i => ({
-    title: i.title || '', price: parseFloat(i.price?.value || 0),
+    title: i.title || '',
+    price: parseFloat(i.price?.value || 0),
     currency: i.price?.currency || 'USD',
     pricingUsd: parseFloat(i.price?.value || 0) * (rates[i.price?.currency] || 1),
-    date: '', url: i.itemWebUrl || '',
+    date: '',
+    url: i.itemWebUrl || '',
     image: i.thumbnailImages?.[0]?.imageUrl || i.image?.imageUrl || '',
-    condition: i.condition || '', marketplace, sold: false
+    condition: i.condition || '',
+    marketplace,
+    sold: false
   })).filter(i => i.price > 0);
 }
 
 function corsHeaders() {
-  return { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': '*', 'Access-Control-Max-Age': '86400' };
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': '*',
+    'Access-Control-Max-Age': '86400'
+  };
 }
 
 function corsJson(obj, status) {
