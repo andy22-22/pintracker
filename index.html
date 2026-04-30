@@ -771,6 +771,8 @@
           <div id="api-status"></div>
         </div>
         <button class="settings-save" onclick="saveSettings()">Save Settings</button>
+        <button class="settings-save" style="margin-top:8px;background:var(--surface2);color:var(--teal);border:1px solid rgba(62,207,207,0.3)" onclick="testConnection()">🔌 Test Connection</button>
+        <div id="test-result" style="margin-top:8px"></div>
       </div>
 
       <div class="settings-section">
@@ -885,6 +887,59 @@ function saveSettings() {
   showToast('Settings saved ✓');
 }
 
+async function testConnection() {
+  const proxy = document.getElementById('proxy-url').value.trim().replace(/\/$/, '');
+  const appId = document.getElementById('ebay-app-id').value.trim();
+  const el    = document.getElementById('test-result');
+
+  if (!proxy || !appId) {
+    el.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>Fill in both fields first</div>';
+    return;
+  }
+
+  el.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>Testing…</div>';
+
+  // Save current values first
+  settings.proxyUrl  = proxy;
+  settings.ebayAppId = appId;
+  localStorage.setItem('pinscout_settings', JSON.stringify(settings));
+
+  try {
+    const testQuery   = encodeURIComponent('Mickey Mouse Disney pin');
+    const targetUrl   = `https://svcs.ebay.com/services/search/FindingService/v1?OPERATION-NAME=findItemsByKeywords&SERVICE-VERSION=1.0.0&SECURITY-APPNAME=${appId}&RESPONSE-DATA-FORMAT=JSON&REST-PAYLOAD&keywords=${testQuery}&categoryId=66522&paginationInput.entriesPerPage=1`;
+    const proxyUrl    = `${proxy}?url=${encodeURIComponent(targetUrl)}`;
+
+    const resp = await fetch(proxyUrl);
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      el.innerHTML = `<div class="status-pill warn" style="white-space:normal;border-radius:10px;padding:10px"><span class="status-dot"></span><strong>Proxy error HTTP ${resp.status}</strong><br/><span style="font-size:11px">${body.substring(0,200)}</span></div>`;
+      return;
+    }
+
+    const data = await resp.json().catch(() => null);
+    if (!data) {
+      el.innerHTML = `<div class="status-pill warn" style="white-space:normal;border-radius:10px;padding:10px"><span class="status-dot"></span>Proxy responded but returned non-JSON. Worker code may not be deployed correctly.</div>`;
+      return;
+    }
+
+    // Check for eBay-level errors
+    const eBayResp = data?.findItemsByKeywordsResponse?.[0];
+    const ack      = eBayResp?.ack?.[0];
+    if (ack === 'Failure') {
+      const errMsg = eBayResp?.errorMessage?.[0]?.error?.[0]?.message?.[0] || 'Unknown eBay error';
+      el.innerHTML = `<div class="status-pill warn" style="white-space:normal;border-radius:10px;padding:10px"><span class="status-dot"></span><strong>eBay rejected the request:</strong><br/><span style="font-size:11px">${errMsg}</span></div>`;
+      return;
+    }
+
+    const count = eBayResp?.searchResult?.[0]?.['@count'] || '?';
+    el.innerHTML = `<div class="status-pill ok" style="white-space:normal;border-radius:10px;padding:10px"><span class="status-dot"></span>✅ <strong>Connection working!</strong> eBay returned results (ack: ${ack}, items: ${count})</div>`;
+    updateApiStatus();
+
+  } catch(err) {
+    el.innerHTML = `<div class="status-pill warn" style="white-space:normal;border-radius:10px;padding:10px"><span class="status-dot"></span><strong>Network error:</strong><br/><span style="font-size:11px">${err.message}</span></div>`;
+  }
+}
+
 // ══════════════════════════════════════
 //  TABS
 // ══════════════════════════════════════
@@ -976,36 +1031,62 @@ async function doSearch() {
   if (!query && !currentImage) return;
   const searchTerm = query || 'Disney pin';
   showLoading();
+
+  // Re-read settings fresh from localStorage every search (catches saves made this session)
+  try { settings = JSON.parse(localStorage.getItem('pinscout_settings') || '{}'); } catch(e) {}
+
+  const proxy = (settings.proxyUrl || '').trim().replace(/\/$/, '');
+  const appId = (settings.ebayAppId || '').trim();
+
+  if (!proxy && !appId) {
+    showError(searchTerm, 'No Proxy URL or eBay App ID found. Please go to Settings and save both values.');
+    return;
+  }
+  if (!proxy) {
+    showError(searchTerm, 'Cloudflare Proxy URL is missing. Please go to Settings and add it.');
+    return;
+  }
+  if (!appId) {
+    showError(searchTerm, 'eBay App ID is missing. Please go to Settings and add it.');
+    return;
+  }
+
   try {
-    if (settings.proxyUrl && settings.ebayAppId) {
-      await searchViaProxy(searchTerm);
-    } else {
-      displayResults(searchTerm, [], []);
-      saveToHistory(searchTerm, null, 0);
-    }
+    await searchViaProxy(searchTerm, proxy, appId);
   } catch(err) {
-    console.error(err);
+    console.error('Search error:', err);
     showError(searchTerm, err.message);
   }
 }
 
-async function searchViaProxy(query) {
+async function searchViaProxy(query, proxy, appId) {
   const [sold, active] = await Promise.allSettled([
-    fetchViaProxy(query, true),
-    fetchViaProxy(query, false)
+    fetchViaProxy(query, true,  proxy, appId),
+    fetchViaProxy(query, false, proxy, appId)
   ]);
+
+  // Surface any fetch errors prominently
+  if (sold.status === 'rejected' && active.status === 'rejected') {
+    throw new Error('Both eBay requests failed: ' + sold.reason?.message);
+  }
+
   const soldItems   = sold.status   === 'fulfilled' ? sold.value   : [];
   const activeItems = active.status === 'fulfilled' ? active.value : [];
+
+  // Warn in console if one failed
+  if (sold.status   === 'rejected') console.warn('Sold fetch failed:',   sold.reason);
+  if (active.status === 'rejected') console.warn('Active fetch failed:', active.reason);
+
   displayResults(query, soldItems, activeItems);
   const value = estimateValue(soldItems);
   saveToHistory(query, value, soldItems.length);
 }
 
-async function fetchViaProxy(query, completedOnly) {
+async function fetchViaProxy(query, completedOnly, proxy, appId) {
   const encodedQuery = encodeURIComponent(query + ' Disney pin');
   const operation = completedOnly ? 'findCompletedItems' : 'findItemsByKeywords';
   let params = `OPERATION-NAME=${operation}&SERVICE-VERSION=1.0.0` +
-    `&SECURITY-APPNAME=${settings.ebayAppId}` +
+    `&SECURITY-APPNAME=${appId}` +
     `&RESPONSE-DATA-FORMAT=JSON&REST-PAYLOAD` +
     `&keywords=${encodedQuery}&categoryId=66522` +
     `&paginationInput.entriesPerPage=${completedOnly ? 30 : 10}` +
@@ -1013,11 +1094,26 @@ async function fetchViaProxy(query, completedOnly) {
   if (completedOnly) params += `&itemFilter(0).name=SoldItemsOnly&itemFilter(0).value=true`;
 
   const targetUrl = `https://svcs.ebay.com/services/search/FindingService/v1?${params}`;
-  const proxyUrl  = `${settings.proxyUrl}?url=${encodeURIComponent(targetUrl)}`;
+  const proxyUrl  = `${proxy}?url=${encodeURIComponent(targetUrl)}`;
 
-  const resp = await fetch(proxyUrl);
-  if (!resp.ok) throw new Error(`Proxy returned ${resp.status}`);
-  const data = await resp.json();
+  let resp;
+  try {
+    resp = await fetch(proxyUrl);
+  } catch(networkErr) {
+    throw new Error(`Cannot reach proxy at ${proxy} — check the URL is correct and the Worker is deployed. (${networkErr.message})`);
+  }
+
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`Proxy returned HTTP ${resp.status}. Body: ${body.substring(0,120)}`);
+  }
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch(e) {
+    throw new Error('Proxy returned non-JSON response — Worker may not be deployed correctly.');
+  }
 
   const key   = completedOnly ? 'findCompletedItemsResponse' : 'findItemsByKeywordsResponse';
   const items = data?.[key]?.[0]?.searchResult?.[0]?.item || [];
@@ -1227,11 +1323,14 @@ function showLoading() {
 }
 
 function showError(query, msg) {
+  const soldUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent((query||'Disney pin')+' Disney pin')}&_sacat=66522&LH_Complete=1&LH_Sold=1`;
   document.getElementById('results-area').innerHTML = `
     <div class="value-card">
       <div class="value-pin-name" style="margin-bottom:8px">⚠️ Search Error</div>
-      <div class="settings-note" style="margin-bottom:12px">${escHtml(msg||'Unknown error')}.<br/><br/>Check your Proxy URL and App ID in Settings.</div>
-      <button class="btn-primary" style="margin-bottom:0" onclick="showTab('settings')">Open Settings →</button>
+      <div style="background:var(--surface2);border-radius:8px;padding:12px;margin-bottom:14px;font-family:'DM Mono',monospace;font-size:12px;line-height:1.7;word-break:break-word;color:var(--text)">${escHtml(msg||'Unknown error')}</div>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px">💡 Tip: Go to Settings and tap <strong style="color:var(--teal)">Test Connection</strong> to diagnose exactly what's wrong.</div>
+      <button class="btn-primary" style="margin-bottom:10px" onclick="showTab('settings')">Open Settings & Test →</button>
+      <a href="${soldUrl}" target="_blank" class="ebay-link">🔍 Search eBay manually →</a>
     </div>`;
 }
 
