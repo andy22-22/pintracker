@@ -27,13 +27,12 @@ async function handleRequest(request) {
 
   const url    = new URL(request.url);
   const query  = url.searchParams.get('q');
-  const filter = url.searchParams.get('filter') || 'sold'; // 'sold' or 'active'
+  const filter = url.searchParams.get('filter') || 'sold';
 
   if (!query) {
     return corsJson({ error: 'Missing ?q= parameter' }, 400);
   }
 
-  // Validate env vars are set
   if (!self.EBAY_CLIENT_ID || !self.EBAY_CLIENT_SECRET) {
     return corsJson({
       error: 'Worker env vars not set. Add EBAY_CLIENT_ID and EBAY_CLIENT_SECRET in Worker Settings → Variables.'
@@ -52,7 +51,7 @@ async function handleRequest(request) {
   }
 }
 
-// ── OAuth token (cached for 90 min) ──
+// ── OAuth token (cached 90 min) ──
 async function getToken() {
   const now = Date.now();
   if (cachedToken && now < tokenExpiry) return cachedToken;
@@ -74,75 +73,124 @@ async function getToken() {
 
   const json = await resp.json();
   cachedToken = json.access_token;
-  tokenExpiry = now + (90 * 60 * 1000); // 90 minutes
+  tokenExpiry = now + (90 * 60 * 1000);
   return cachedToken;
 }
 
-// ── Browse API search ──
+// ── Browse API search — searches globally across all eBay sites ──
 async function searchEbay(token, query, filter) {
-  // Build search term — always append "Disney pin" for relevance
   const searchTerm = query.toLowerCase().includes('disney') ? query : query + ' Disney pin';
 
-  // For sold items we use the Marketplace Insights API (itemSales)
-  // For active listings we use the Browse API (search)
-  let apiUrl;
+  // Search multiple marketplaces in parallel for global coverage
+  const marketplaces = ['EBAY_US', 'EBAY_GB', 'EBAY_AU', 'EBAY_DE', 'EBAY_FR'];
+
   if (filter === 'sold') {
-    apiUrl = `https://api.ebay.com/buy/marketplace_insights/v1_beta/item_sales/search` +
-      `?q=${encodeURIComponent(searchTerm)}` +
-      `&category_ids=66522` +
-      `&limit=30` +
-      `&sort=endDate`;
+    // Marketplace Insights API — try each market, merge results
+    const results = await Promise.allSettled(
+      marketplaces.map(mkt => fetchSoldFromMarket(token, searchTerm, mkt))
+    );
+    let allItems = [];
+    for (const r of results) {
+      if (r.status === 'fulfilled') allItems = allItems.concat(r.value);
+    }
+    // If Marketplace Insights unavailable everywhere, fall back to Browse
+    if (allItems.length === 0) {
+      return await searchBrowseFallback(token, searchTerm);
+    }
+    // Dedupe by URL, sort by date desc
+    const seen = new Set();
+    allItems = allItems.filter(i => { if (seen.has(i.url)) return false; seen.add(i.url); return true; });
+    allItems.sort((a, b) => new Date(b.date||0) - new Date(a.date||0));
+    return { items: allItems.slice(0, 100), total: allItems.length, source: 'marketplace_insights' };
   } else {
-    apiUrl = `https://api.ebay.com/buy/browse/v1/item_summary/search` +
-      `?q=${encodeURIComponent(searchTerm)}` +
-      `&category_ids=66522` +
-      `&limit=20` +
-      `&sort=bestMatch`;
+    // Browse API active listings — search US + GB, merge and dedupe
+    const results = await Promise.allSettled(
+      ['EBAY_US', 'EBAY_GB'].map(mkt => fetchActiveFromMarket(token, searchTerm, mkt))
+    );
+    let allItems = [];
+    for (const r of results) {
+      if (r.status === 'fulfilled') allItems = allItems.concat(r.value);
+    }
+    const seen = new Set();
+    allItems = allItems.filter(i => { if (seen.has(i.url)) return false; seen.add(i.url); return true; });
+    return { items: allItems.slice(0, 40), total: allItems.length, source: 'browse' };
   }
+}
+
+async function fetchSoldFromMarket(token, searchTerm, marketplace) {
+  const apiUrl = `https://api.ebay.com/buy/marketplace_insights/v1_beta/item_sales/search` +
+    `?q=${encodeURIComponent(searchTerm)}&limit=100&sort=endDate`;
 
   const resp = await fetch(apiUrl, {
     headers: {
-      'Authorization':       `Bearer ${token}`,
-      'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US',
-      'Content-Type':        'application/json'
+      'Authorization':           `Bearer ${token}`,
+      'X-EBAY-C-MARKETPLACE-ID': marketplace,
+      'Content-Type':            'application/json'
     }
   });
 
-  if (!resp.ok) {
-    const body = await resp.text();
-    // If marketplace insights not available, fall back to browse for active
-    if (resp.status === 403 && filter === 'sold') {
-      return { items: [], source: 'sold_unavailable', note: 'Sold data requires Marketplace Insights API access' };
-    }
-    throw new Error(`eBay ${filter} search failed (${resp.status}): ${body.substring(0, 300)}`);
-  }
-
+  if (!resp.ok) return [];
   const data = await resp.json();
+  return (data.itemSales || []).map(i => ({
+    title:       i.title || '',
+    price:       parseFloat(i.lastSoldPrice?.value || i.price?.value || 0),
+    currency:    i.lastSoldPrice?.currency || 'USD',
+    pricingUsd:  convertToUsd(parseFloat(i.lastSoldPrice?.value || 0), i.lastSoldPrice?.currency || 'USD'),
+    date:        i.lastSoldDate || '',
+    url:         i.itemWebUrl || '',
+    image:       i.image?.imageUrl || '',
+    condition:   i.condition || '',
+    marketplace: marketplace,
+    sold:        true
+  })).filter(i => i.price > 0);
+}
 
-  // Normalise response into consistent shape
-  if (filter === 'sold') {
-    const items = (data.itemSales || []).map(i => ({
-      title:     i.title || '',
-      price:     parseFloat(i.lastSoldPrice?.value || i.price?.value || 0),
-      currency:  i.lastSoldPrice?.currency || 'USD',
-      date:      i.lastSoldDate || '',
-      url:       i.itemWebUrl || '',
-      condition: i.condition || '',
-      sold:      true
-    })).filter(i => i.price > 0);
-    return { items, total: data.total || items.length, source: 'marketplace_insights' };
-  } else {
-    const items = (data.itemSummaries || []).map(i => ({
-      title:     i.title || '',
-      price:     parseFloat(i.price?.value || 0),
-      currency:  i.price?.currency || 'USD',
-      date:      '',
-      url:       i.itemWebUrl || '',
-      condition: i.condition || '',
-      sold:      false
-    })).filter(i => i.price > 0);
-    return { items, total: data.total || items.length, source: 'browse' };
+async function fetchActiveFromMarket(token, searchTerm, marketplace) {
+  const apiUrl = `https://api.ebay.com/buy/browse/v1/item_summary/search` +
+    `?q=${encodeURIComponent(searchTerm)}&limit=30&sort=bestMatch`;
+
+  const resp = await fetch(apiUrl, {
+    headers: {
+      'Authorization':           `Bearer ${token}`,
+      'X-EBAY-C-MARKETPLACE-ID': marketplace,
+      'Content-Type':            'application/json'
+    }
+  });
+
+  if (!resp.ok) return [];
+  const data = await resp.json();
+  return (data.itemSummaries || []).map(i => ({
+    title:       i.title || '',
+    price:       parseFloat(i.price?.value || 0),
+    currency:    i.price?.currency || 'USD',
+    pricingUsd:  convertToUsd(parseFloat(i.price?.value || 0), i.price?.currency || 'USD'),
+    date:        '',
+    url:         i.itemWebUrl || '',
+    image:       i.thumbnailImages?.[0]?.imageUrl || i.image?.imageUrl || '',
+    condition:   i.condition || '',
+    marketplace: marketplace,
+    sold:        false
+  })).filter(i => i.price > 0);
+}
+
+// Approximate conversion to USD for consistent median/avg calculations
+// The app then re-converts to display currency using live rates
+function convertToUsd(amount, currency) {
+  const rates = { USD: 1, GBP: 1.27, AUD: 0.65, EUR: 1.08, CAD: 0.73 };
+  return amount * (rates[currency] || 1);
+}
+
+async function searchBrowseFallback(token, searchTerm) {
+  const results = await Promise.allSettled(
+    ['EBAY_US', 'EBAY_GB'].map(mkt => fetchActiveFromMarket(token, searchTerm, mkt))
+  );
+  let allItems = [];
+  for (const r of results) {
+    if (r.status === 'fulfilled') allItems = allItems.concat(r.value);
   }
+  // Mark as pseudo-sold for value estimation
+  allItems = allItems.map(i => ({ ...i, sold: false }));
+  return { items: allItems.slice(0, 100), total: allItems.length, source: 'browse_fallback' };
 }
 
 function corsHeaders() {

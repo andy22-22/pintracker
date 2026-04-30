@@ -97,6 +97,84 @@
     }
     #settings-btn:hover { border-color: var(--gold-dim); color: var(--gold); }
 
+    .currency-toggle {
+      display: flex;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .currency-btn {
+      padding: 5px 11px;
+      font-family: 'DM Mono', monospace;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      color: var(--text-dim);
+      transition: all .2s;
+      border: none;
+      background: transparent;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .currency-btn.active { background: var(--gold); color: #0a0a0f; border-radius: 20px; }
+    .fx-rate { font-family: 'DM Mono', monospace; font-size: 9px; color: var(--text-faint); text-align: center; padding: 2px 0 0; }
+
+    /* pagination */
+    .pagination {
+      display: flex; align-items: center; justify-content: center;
+      gap: 8px; padding: 12px 0 4px;
+    }
+    .page-btn {
+      padding: 6px 14px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-dim);
+      font-family: 'DM Mono', monospace;
+      font-size: 11px;
+      cursor: pointer;
+      transition: all .2s;
+    }
+    .page-btn:disabled { opacity: 0.3; cursor: default; }
+    .page-btn.active { border-color: var(--gold); color: var(--gold); }
+    .page-info { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--text-dim); }
+
+    /* date filter */
+    .date-filter {
+      display: flex; gap: 6px; align-items: center;
+      padding: 10px 0 4px;
+      flex-wrap: wrap;
+    }
+    .date-filter label { font-size: 11px; color: var(--text-dim); font-family: 'DM Mono', monospace; }
+    .date-input {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 5px 8px;
+      color: var(--text); font-family: 'DM Mono', monospace; font-size: 11px;
+      outline: none; flex: 1; min-width: 100px;
+    }
+    .date-input:focus { border-color: var(--gold-dim); }
+    .date-clear { font-size: 11px; color: var(--teal); cursor: pointer; font-family: 'DM Mono', monospace; }
+
+    /* thumbnail in listing rows */
+    .listing-thumb {
+      width: 44px; height: 44px;
+      border-radius: 8px;
+      object-fit: cover;
+      background: var(--surface2);
+      flex-shrink: 0;
+      border: 1px solid var(--border);
+    }
+    .listing-thumb-placeholder {
+      width: 44px; height: 44px;
+      border-radius: 8px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; color: var(--text-faint);
+    }
+
     /* ── TABS ── */
     nav {
       display: flex;
@@ -685,6 +763,13 @@
       <span class="logo-word">PinScout</span>
       <span class="logo-sub">Disney Pins</span>
     </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+      <div class="currency-toggle">
+        <button class="currency-btn active" id="btn-usd" onclick="setCurrency('USD')">$ USD</button>
+        <button class="currency-btn" id="btn-gbp" onclick="setCurrency('GBP')">£ GBP</button>
+      </div>
+      <div class="fx-rate" id="fx-rate-display"></div>
+    </div>
     <div id="settings-btn" onclick="showTab('settings')">⚙</div>
   </header>
 
@@ -849,13 +934,75 @@ let currentImage = null;
 let currentResults = null;
 let settings = {};
 
+// Currency
+let activeCurrency = 'USD'; // 'USD' or 'GBP'
+let fxRate = null;           // USD→GBP rate, fetched once per session
+let fxFetched = false;
+
+// Pagination + filter state
+let soldPage     = 1;
+const PAGE_SIZE  = 20;
+let filterFrom   = null;
+let filterTo     = null;
+
 function loadSettings() {
   try {
     settings = JSON.parse(localStorage.getItem('pinscout_settings') || '{}');
   } catch(e) { settings = {}; }
   if (settings.proxyUrl) document.getElementById('proxy-url').value = settings.proxyUrl;
+  if (settings.currency) { activeCurrency = settings.currency; updateCurrencyUI(); }
   updateApiStatus();
   updateHistoryCount();
+  fetchFxRate();
+}
+
+// ── Currency ──
+function setCurrency(cur) {
+  activeCurrency = cur;
+  settings.currency = cur;
+  localStorage.setItem('pinscout_settings', JSON.stringify(settings));
+  updateCurrencyUI();
+  // Re-render results if we have them
+  if (currentResults) displayResults(currentResults.query, currentResults.sold, currentResults.active);
+}
+
+function updateCurrencyUI() {
+  document.getElementById('btn-usd').classList.toggle('active', activeCurrency === 'USD');
+  document.getElementById('btn-gbp').classList.toggle('active', activeCurrency === 'GBP');
+}
+
+async function fetchFxRate() {
+  if (fxFetched) return;
+  fxFetched = true;
+  try {
+    // Free, no-key FX API
+    const resp = await fetch('https://open.er-api.com/v6/latest/USD');
+    if (!resp.ok) throw new Error('FX fetch failed');
+    const data = await resp.json();
+    fxRate = data.rates?.GBP || null;
+    if (fxRate) {
+      document.getElementById('fx-rate-display').textContent = `1 USD = £${fxRate.toFixed(4)}`;
+    }
+  } catch(e) {
+    // Fallback rate if API is down
+    fxRate = 0.79;
+    document.getElementById('fx-rate-display').textContent = `~est rate`;
+  }
+}
+
+function toDisplayPrice(usdPrice) {
+  if (activeCurrency === 'GBP' && fxRate) return usdPrice * fxRate;
+  return usdPrice;
+}
+
+function fmtPrice(usdPrice) {
+  const p = toDisplayPrice(usdPrice);
+  return activeCurrency === 'GBP' ? `£${p.toFixed(2)}` : `$${p.toFixed(2)}`;
+}
+
+function fmtPriceShort(usdPrice) {
+  const p = toDisplayPrice(usdPrice);
+  return activeCurrency === 'GBP' ? `£${p.toFixed(0)}` : `$${p.toFixed(0)}`;
 }
 
 function updateApiStatus() {
@@ -1047,8 +1194,8 @@ async function searchViaProxy(query, proxy, appId) {
   if (sold.status   === 'rejected') console.warn('Sold fetch failed:',   sold.reason);
   if (active.status === 'rejected') console.warn('Active fetch failed:', active.reason);
 
-  displayResults(query, soldItems, activeItems);
-  const value = estimateValue(soldItems);
+  displayResults(query, soldItems, activeItems, true);
+  const value = estimateValue(soldItems.length ? soldItems : activeItems);
   saveToHistory(query, value, soldItems.length);
 }
 
@@ -1076,10 +1223,11 @@ async function fetchViaProxy(query, completedOnly, proxy, appId) {
 
   if (data.error) throw new Error('Worker error: ' + data.error);
 
-  // Sold items unavailable (Marketplace Insights not enabled) — return empty gracefully
-  if (data.source === 'sold_unavailable') return [];
-
-  return (data.items || []);
+  // Normalise prices — use pricingUsd for all calculations; display layer converts
+  return (data.items || []).map(i => ({
+    ...i,
+    price: i.pricingUsd || i.price  // always in USD for median/avg math
+  }));
 }
 
 function estimateValue(soldItems) {
@@ -1097,25 +1245,38 @@ function calcAverage(items) {
 // ══════════════════════════════════════
 //  DISPLAY RESULTS
 // ══════════════════════════════════════
-function displayResults(query, sold, active) {
+function displayResults(query, sold, active, resetPage) {
+  if (resetPage) { soldPage = 1; filterFrom = null; filterTo = null; }
   const area = document.getElementById('results-area');
   const hasData = sold.length > 0 || active.length > 0;
+  if (!hasData) { area.innerHTML = buildSetupPrompt(query); return; }
 
-  if (!hasData) {
-    area.innerHTML = buildSetupPrompt(query);
-    return;
+  // Apply date filter to sold
+  let filteredSold = sold;
+  if (filterFrom || filterTo) {
+    filteredSold = sold.filter(i => {
+      if (!i.date) return true;
+      const d = new Date(i.date);
+      if (filterFrom && d < new Date(filterFrom)) return false;
+      if (filterTo   && d > new Date(filterTo + 'T23:59:59')) return false;
+      return true;
+    });
   }
 
-  const value    = estimateValue(sold);
-  const prices   = sold.map(i => i.price);
-  const minP     = prices.length ? Math.min(...prices) : 0;
-  const maxP     = prices.length ? Math.max(...prices) : 0;
-  const avgSold  = calcAverage(sold);
-  const avgActive= calcAverage(active);
-  const confidence = Math.min(100, sold.length * 7);
+  const allPrices = filteredSold.map(i => i.price);
+  const value     = estimateValue(filteredSold);
+  const minP      = allPrices.length ? Math.min(...allPrices) : 0;
+  const maxP      = allPrices.length ? Math.max(...allPrices) : 0;
+  const avgSold   = calcAverage(filteredSold);
+  const avgActive = calcAverage(active);
+  const confidence = Math.min(100, filteredSold.length * 7);
+  const buckets   = buildBuckets(allPrices);
 
-  // Price distribution buckets for mini histogram
-  const buckets = buildBuckets(prices);
+  // Pagination
+  const totalPages = Math.max(1, Math.ceil(filteredSold.length / PAGE_SIZE));
+  if (soldPage > totalPages) soldPage = totalPages;
+  const pageStart = (soldPage - 1) * PAGE_SIZE;
+  const pageSold  = filteredSold.slice(pageStart, pageStart + PAGE_SIZE);
 
   let html = '';
 
@@ -1123,30 +1284,28 @@ function displayResults(query, sold, active) {
   html += `<div class="section-label">Estimated Value</div>`;
   html += `<div class="value-card">
     <div class="value-pin-name">${escHtml(query)}</div>
-    <div class="value-meta">Median of ${sold.length} recent sold listing${sold.length!==1?'s':''}</div>
+    <div class="value-meta">Median of ${filteredSold.length} sold listing${filteredSold.length!==1?'s':''} ${filterFrom||filterTo?'(filtered)':''}</div>
     <div class="value-main">
-      <div class="value-price">${value ? '$'+value.toFixed(2) : '—'}</div>
+      <div class="value-price">${value ? fmtPrice(value) : '—'}</div>
       <div class="value-label">Median sold</div>
     </div>
-    ${minP&&maxP ? `<div class="value-range">Range: <span>$${minP.toFixed(2)}</span> — <span>$${maxP.toFixed(2)}</span></div>` : ''}
-    <div class="confidence-bar-wrap">
-      <div class="confidence-bar" style="width:${confidence}%"></div>
-    </div>
-    <div class="confidence-label">Confidence: ${confidence<30?'Low':confidence<70?'Medium':'High'} (${sold.length} data points)</div>
+    ${minP&&maxP ? `<div class="value-range">Range: <span>${fmtPrice(minP)}</span> — <span>${fmtPrice(maxP)}</span></div>` : ''}
+    <div class="confidence-bar-wrap"><div class="confidence-bar" style="width:${confidence}%"></div></div>
+    <div class="confidence-label">Confidence: ${confidence<30?'Low':confidence<70?'Medium':'High'} (${filteredSold.length} data points)</div>
   </div>`;
 
-  // ── Stats row: sold count / avg sold / avg listed ──
+  // ── Stats row ──
   html += `<div class="stats-row">
     <div class="stat-chip">
-      <span class="stat-chip-val">${sold.length}</span>
-      <span class="stat-chip-lbl">Sold (90d)</span>
+      <span class="stat-chip-val">${filteredSold.length}</span>
+      <span class="stat-chip-lbl">Sold</span>
     </div>
     <div class="stat-chip">
-      <span class="stat-chip-val" style="color:var(--green)">${avgSold ? '$'+avgSold.toFixed(2) : '—'}</span>
+      <span class="stat-chip-val" style="color:var(--green)">${avgSold ? fmtPrice(avgSold) : '—'}</span>
       <span class="stat-chip-lbl">Avg Sold</span>
     </div>
     <div class="stat-chip">
-      <span class="stat-chip-val" style="color:var(--teal)">${avgActive ? '$'+avgActive.toFixed(2) : '—'}</span>
+      <span class="stat-chip-val" style="color:var(--teal)">${avgActive ? fmtPrice(avgActive) : '—'}</span>
       <span class="stat-chip-lbl">Avg Listed</span>
     </div>
   </div>`;
@@ -1159,77 +1318,116 @@ function displayResults(query, sold, active) {
     const maxCount = Math.max(...buckets.map(b=>b.count));
     buckets.forEach(b => {
       const h = maxCount ? Math.max(4, Math.round((b.count/maxCount)*44)) : 4;
-      html += `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px">
-        <div style="width:100%;height:${h}px;background:var(--gold);border-radius:3px 3px 0 0;opacity:${0.4+0.6*(b.count/maxCount)}"></div>
-      </div>`;
+      html += `<div style="flex:1"><div style="width:100%;height:${h}px;background:var(--gold);border-radius:3px 3px 0 0;opacity:${0.4+0.6*(b.count/maxCount)}"></div></div>`;
     });
-    html += `</div>`;
-    html += `<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-dim);font-family:'DM Mono',monospace">`;
-    html += `<span>$${minP.toFixed(0)}</span><span>$${maxP.toFixed(0)}</span>`;
-    html += `</div></div>`;
+    html += `</div><div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-dim);font-family:'DM Mono',monospace">`;
+    html += `<span>${fmtPriceShort(minP)}</span><span>${fmtPriceShort(maxP)}</span></div></div>`;
   }
 
-  // ── Sold listings ──
+  // ── Sold listings with date filter + pagination ──
   if (sold.length > 0) {
-    html += `<div class="section-label" style="margin-top:6px">Recently Sold <span style="color:var(--green);margin-left:4px">● ${sold.length} results</span></div>`;
-    html += `<div class="value-card" style="padding:8px 14px">`;
-    sold.slice(0, 10).forEach(item => {
-      const d = item.date ? new Date(item.date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}) : '';
+    html += `<div class="section-label" style="margin-top:6px">Recently Sold <span style="color:var(--green);margin-left:4px">● ${filteredSold.length}${filteredSold.length!==sold.length?' (filtered of '+sold.length+')':''}</span></div>`;
+
+    // Date filter controls
+    html += `<div class="date-filter">
+      <label>From</label>
+      <input type="date" class="date-input" id="filter-from" value="${filterFrom||''}" onchange="applyDateFilter()" />
+      <label>To</label>
+      <input type="date" class="date-input" id="filter-to" value="${filterTo||''}" onchange="applyDateFilter()" />
+      ${filterFrom||filterTo ? `<span class="date-clear" onclick="clearDateFilter()">✕ Clear</span>` : ''}
+    </div>`;
+
+    html += `<div class="value-card" style="padding:8px 14px" id="sold-list">`;
+    if (pageSold.length === 0) {
+      html += `<div style="padding:14px 0;text-align:center;color:var(--text-dim);font-size:13px">No sold items match this date range</div>`;
+    }
+    pageSold.forEach(item => {
+      const d    = item.date ? new Date(item.date).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}) : '';
       const isHigh = value && item.price > value * 1.3;
       const isLow  = value && item.price < value * 0.7;
+      const thumb  = item.image || '';
       html += `<div class="listing-row" ${item.url?`onclick="window.open('${escAttr(item.url)}','_blank')" style="cursor:pointer"`:''}>
-        <div class="listing-dot dot-sold"></div>
+        ${thumb
+          ? `<img class="listing-thumb" src="${escHtml(thumb)}" alt="" loading="lazy" onerror="this.style.display='none'" />`
+          : `<div class="listing-thumb-placeholder">📌</div>`}
         <div class="listing-info">
-          <div class="listing-title">${escHtml(item.title.substring(0,58))}</div>
-          ${d?`<div class="listing-date">${d}${item.condition?' · '+item.condition:''}</div>`:''}
+          <div class="listing-title">${escHtml(item.title.substring(0,55))}</div>
+          <div class="listing-date">${d?d:''}${d&&item.condition?' · ':''}${item.condition||''}${item.marketplace&&item.marketplace!=='EBAY_US'?' · <span style="color:var(--gold);font-size:10px">'+item.marketplace.replace('EBAY_','')+'</span>':''}</div>
         </div>
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">
-          <div class="listing-price sold-price">$${item.price.toFixed(2)}</div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex-shrink:0">
+          <div class="listing-price sold-price">${fmtPrice(item.price)}</div>
           ${isHigh?'<div style="font-size:9px;color:var(--gold);font-family:\'DM Mono\',monospace">HIGH</div>':''}
-          ${isLow ?'<div style="font-size:9px;color:var(--teal);font-family:\'DM Mono\',monospace">LOW</div>' :''}
+          ${isLow ?'<div style="font-size:9px;color:var(--teal);font-family:\'DM Mono\',monospace">LOW</div>'  :''}
         </div>
       </div>`;
     });
     html += `</div>`;
-    // Average row below sold
-    html += `<div style="display:flex;justify-content:flex-end;padding:4px 4px 0;font-size:12px;color:var(--text-dim)">
-      Average sold: <span style="color:var(--green);margin-left:6px;font-family:'DM Mono',monospace">$${avgSold.toFixed(2)}</span>
-    </div>`;
+
+    // Avg + pagination
+    if (avgSold) {
+      html += `<div style="display:flex;justify-content:flex-end;padding:4px 4px 0;font-size:12px;color:var(--text-dim)">
+        Avg sold: <span style="color:var(--green);margin-left:6px;font-family:'DM Mono',monospace">${fmtPrice(avgSold)}</span>
+      </div>`;
+    }
+    if (totalPages > 1) {
+      html += `<div class="pagination">
+        <button class="page-btn" onclick="goPage(${soldPage-1})" ${soldPage<=1?'disabled':''}>‹ Prev</button>
+        <span class="page-info">Page ${soldPage} / ${totalPages} &nbsp;(${filteredSold.length} total)</span>
+        <button class="page-btn" onclick="goPage(${soldPage+1})" ${soldPage>=totalPages?'disabled':''}>Next ›</button>
+      </div>`;
+    }
   }
 
   // ── Active listings ──
   if (active.length > 0) {
-    html += `<div class="section-label" style="margin-top:14px">Currently Listed <span style="color:var(--teal);margin-left:4px">● ${active.length} results</span></div>`;
+    html += `<div class="section-label" style="margin-top:14px">Currently Listed <span style="color:var(--teal);margin-left:4px">● ${active.length}</span></div>`;
     html += `<div class="value-card" style="padding:8px 14px">`;
-    active.slice(0, 8).forEach(item => {
+    active.slice(0, 20).forEach(item => {
+      const thumb = item.image || '';
       html += `<div class="listing-row" ${item.url?`onclick="window.open('${escAttr(item.url)}','_blank')" style="cursor:pointer"`:''}>
-        <div class="listing-dot dot-active"></div>
+        ${thumb
+          ? `<img class="listing-thumb" src="${escHtml(thumb)}" alt="" loading="lazy" onerror="this.style.display='none'" />`
+          : `<div class="listing-thumb-placeholder">📌</div>`}
         <div class="listing-info">
-          <div class="listing-title">${escHtml(item.title.substring(0,58))}</div>
+          <div class="listing-title">${escHtml(item.title.substring(0,55))}</div>
           ${item.condition?`<div class="listing-date">${item.condition}</div>`:''}
         </div>
-        <div class="listing-price active-price">$${item.price.toFixed(2)}</div>
+        <div class="listing-price active-price" style="flex-shrink:0">${fmtPrice(item.price)}</div>
       </div>`;
     });
     html += `</div>`;
-    html += `<div style="display:flex;justify-content:flex-end;padding:4px 4px 0;font-size:12px;color:var(--text-dim)">
-      Average listed: <span style="color:var(--teal);margin-left:6px;font-family:'DM Mono',monospace">$${avgActive.toFixed(2)}</span>
-    </div>`;
+    if (avgActive) {
+      html += `<div style="display:flex;justify-content:flex-end;padding:4px 4px 0;font-size:12px;color:var(--text-dim)">
+        Avg listed: <span style="color:var(--teal);margin-left:6px;font-family:'DM Mono',monospace">${fmtPrice(avgActive)}</span>
+      </div>`;
+    }
   }
 
   // ── eBay deep link ──
-  const ebayUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query+' Disney pin')}&_sacat=66522&LH_Complete=1&LH_Sold=1`;
-  html += `<a href="${ebayUrl}" target="_blank" class="ebay-link" style="margin-top:14px">
-    🛍 View all on eBay →
-  </a>`;
-
-  // Save button
-  if (value) {
-    html += `<button class="save-btn" onclick="saveCurrentSearch()">📌 Save to History</button>`;
-  }
+  const ebayUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query+' Disney pin')}&LH_Complete=1&LH_Sold=1`;
+  html += `<a href="${ebayUrl}" target="_blank" class="ebay-link" style="margin-top:14px">🛍 View all on eBay →</a>`;
+  if (value) html += `<button class="save-btn" onclick="saveCurrentSearch()">📌 Save to History</button>`;
 
   area.innerHTML = html;
   currentResults = { query, value, sold, active };
+}
+
+function goPage(n) {
+  if (!currentResults) return;
+  soldPage = n;
+  displayResults(currentResults.query, currentResults.sold, currentResults.active, false);
+  document.getElementById('results-area').scrollIntoView({ behavior: 'smooth' });
+}
+
+function applyDateFilter() {
+  filterFrom = document.getElementById('filter-from')?.value || null;
+  filterTo   = document.getElementById('filter-to')?.value   || null;
+  if (currentResults) displayResults(currentResults.query, currentResults.sold, currentResults.active, false);
+}
+
+function clearDateFilter() {
+  filterFrom = null; filterTo = null;
+  if (currentResults) displayResults(currentResults.query, currentResults.sold, currentResults.active, false);
 }
 
 function buildBuckets(prices) {
@@ -1239,10 +1437,7 @@ function buildBuckets(prices) {
   const n = Math.min(8, prices.length);
   const size = (max - min) / n;
   const buckets = Array.from({length: n}, (_,i) => ({ from: min+i*size, to: min+(i+1)*size, count: 0 }));
-  prices.forEach(p => {
-    const i = Math.min(n-1, Math.floor((p-min)/size));
-    buckets[i].count++;
-  });
+  prices.forEach(p => { const i = Math.min(n-1, Math.floor((p-min)/size)); buckets[i].count++; });
   return buckets;
 }
 
@@ -1334,7 +1529,7 @@ function renderHistory() {
   }
   el.innerHTML = history.map(entry => {
     const d = new Date(entry.date).toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'});
-    const priceStr = entry.value ? '$' + entry.value.toFixed(2) : '—';
+    const priceStr = entry.value ? fmtPrice(entry.value) : '—';
     return `<div class="history-card" onclick="reSearch('${escAttr(entry.query)}')">
       <div class="history-card-top">
         <div class="history-card-name">${escHtml(entry.query)}</div>
