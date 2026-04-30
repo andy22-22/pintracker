@@ -1348,7 +1348,7 @@ function displayResults(query, sold, active, resetPage) {
       const thumb  = item.image || '';
       html += `<div class="listing-row" ${item.url?`onclick="window.open('${escAttr(item.url)}','_blank')" style="cursor:pointer"`:''}>
         ${thumb
-          ? `<img class="listing-thumb" src="${escHtml(thumb)}" alt="" loading="lazy" onerror="this.style.display='none'" />`
+          ? `<img class="listing-thumb" src="${escHtml(thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'listing-thumb-placeholder',textContent:'📌'}))" />`
           : `<div class="listing-thumb-placeholder">📌</div>`}
         <div class="listing-info">
           <div class="listing-title">${escHtml(item.title.substring(0,55))}</div>
@@ -1386,7 +1386,7 @@ function displayResults(query, sold, active, resetPage) {
       const thumb = item.image || '';
       html += `<div class="listing-row" ${item.url?`onclick="window.open('${escAttr(item.url)}','_blank')" style="cursor:pointer"`:''}>
         ${thumb
-          ? `<img class="listing-thumb" src="${escHtml(thumb)}" alt="" loading="lazy" onerror="this.style.display='none'" />`
+          ? `<img class="listing-thumb" src="${escHtml(thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'listing-thumb-placeholder',textContent:'📌'}))" />`
           : `<div class="listing-thumb-placeholder">📌</div>`}
         <div class="listing-info">
           <div class="listing-title">${escHtml(item.title.substring(0,55))}</div>
