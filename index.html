@@ -875,6 +875,7 @@
         </div>
         <button class="settings-save" onclick="saveSettings()">Save Settings</button>
         <button class="settings-save" style="margin-top:8px;background:var(--surface2);color:var(--teal);border:1px solid rgba(62,207,207,0.3)" onclick="testConnection()">🔌 Test Connection</button>
+        <button class="settings-save" style="margin-top:8px;background:var(--surface2);color:var(--text-dim);border:1px solid var(--border)" onclick="runDiagnostic()">🔬 Diagnose Sold Data</button>
         <div id="test-result" style="margin-top:8px"></div>
       </div>
 
@@ -1093,6 +1094,44 @@ async function testConnection() {
   }
 }
 
+async function runDiagnostic() {
+  const proxy = (settings.proxyUrl || '').trim().replace(/\/$/, '');
+  const el    = document.getElementById('test-result');
+  if (!proxy) { el.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>Enter Proxy URL first</div>'; return; }
+  el.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>Diagnosing — fetching eBay page via Worker…</div>';
+  try {
+    const resp = await fetch(`${proxy}?q=marie+cat+nap&filter=debug`);
+    const data = await resp.json();
+    const lines = [
+      `HTTP OK: ${data.httpOk}`,
+      `HTML length: ${data.htmlLength}`,
+      `Has s-item: ${data.hasItems} (count: ${data.itemCount})`,
+      `Has s-card: ${data.hasCards} (count: ${data.cardCount})`,
+      `CAPTCHA: ${data.hasCaptcha}`,
+      data.error ? `Error: ${data.error}` : '',
+      data.debug ? `Debug: ${data.debug}` : ''
+    ].filter(Boolean).join('\n');
+    const color = data.hasCaptcha ? 'var(--red)' : (data.itemCount > 0 || data.cardCount > 0) ? 'var(--green)' : 'var(--gold)';
+    el.innerHTML = `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-top:8px;font-family:'DM Mono',monospace;font-size:11px;line-height:1.8;color:${color};white-space:pre-wrap;word-break:break-all">${escHtml(lines)}</div>
+    <div style="font-size:11px;color:var(--text-dim);margin-top:8px">Share these results in the chat if sold items still don't appear.</div>`;
+  } catch(err) {
+    el.innerHTML = `<div class="status-pill warn" style="white-space:normal;border-radius:10px;padding:10px"><span class="status-dot"></span>${escHtml(err.message)}</div>`;
+  }
+}
+
+function showDebugInResults(debugStr) {
+  if (!debugStr) return;
+  const area = document.getElementById('results-area');
+  if (!area) return;
+  const existing = area.querySelector('.debug-bar');
+  if (existing) existing.remove();
+  const div = document.createElement('div');
+  div.className = 'debug-bar';
+  div.style.cssText = 'font-family:DM Mono,monospace;font-size:10px;color:var(--text-faint);padding:6px 20px 2px;line-height:1.6;word-break:break-all';
+  div.textContent = '🔬 ' + debugStr;
+  area.prepend(div);
+}
+
 // ══════════════════════════════════════
 //  TABS
 // ══════════════════════════════════════
@@ -1209,19 +1248,17 @@ async function searchViaProxy(query, proxy, appId) {
     fetchViaProxy(query, false, proxy, appId)
   ]);
 
-  // Surface any fetch errors prominently
   if (sold.status === 'rejected' && active.status === 'rejected') {
     throw new Error('Both eBay requests failed: ' + sold.reason?.message);
   }
 
-  const soldItems   = sold.status   === 'fulfilled' ? sold.value   : [];
-  const activeItems = active.status === 'fulfilled' ? active.value : [];
-
-  // Warn in console if one failed
-  if (sold.status   === 'rejected') console.warn('Sold fetch failed:',   sold.reason);
-  if (active.status === 'rejected') console.warn('Active fetch failed:', active.reason);
+  const soldResult  = sold.status   === 'fulfilled' ? sold.value   : { items: [], debug: sold.reason?.message };
+  const activeResult= active.status === 'fulfilled' ? active.value : { items: [] };
+  const soldItems   = soldResult.items   || [];
+  const activeItems = activeResult.items || [];
 
   displayResults(query, soldItems, activeItems, true);
+  if (soldResult.debug) showDebugInResults(soldResult.debug);
   const value = estimateValue(soldItems.length ? soldItems : activeItems);
   saveToHistory(query, value, soldItems.length);
 }
@@ -1250,11 +1287,9 @@ async function fetchViaProxy(query, completedOnly, proxy, appId) {
 
   if (data.error) throw new Error('Worker error: ' + data.error);
 
-  // Normalise prices — use pricingUsd for all calculations; display layer converts
-  return (data.items || []).map(i => ({
-    ...i,
-    price: i.pricingUsd || i.price  // always in USD for median/avg math
-  }));
+  // Normalise prices to USD for calculations
+  const items = (data.items || []).map(i => ({ ...i, price: i.pricingUsd || i.price }));
+  return { items, debug: data.debug || '', source: data.source || '' };
 }
 
 function estimateValue(soldItems) {
