@@ -941,19 +941,28 @@
 <!-- CAMERA OPTIONS MODAL -->
 <div class="modal-overlay" id="camera-modal">
   <div class="modal">
-    <div class="modal-title">📷 Image Search</div>
+    <div class="modal-title">📷 Search by Image</div>
     <div class="modal-body">
-      <p style="margin-bottom:14px">Choose how to search by image:</p>
+      <p style="margin-bottom:14px;color:var(--text)">Take or choose a photo of your pin — AI will identify it and search prices automatically.</p>
       <div style="display:flex;flex-direction:column;gap:8px">
-        <button class="btn-primary" onclick="openCamera()" style="margin-top:0">Take Photo Now</button>
-        <button class="btn-primary" onclick="openGallery()" style="margin-top:0;background:var(--surface2);color:var(--text);border:1px solid var(--border)">Choose from Library</button>
-        <button class="btn-primary" onclick="openGoogleLens()" style="margin-top:0;background:var(--teal-dim);color:var(--teal);border:1px solid rgba(62,207,207,0.3)">Open Google Lens 🔗</button>
+        <button class="btn-primary" onclick="openCamera()" style="margin-top:0">📷 Take Photo</button>
+        <button class="btn-primary" onclick="openGallery()" style="margin-top:0;background:var(--surface2);color:var(--text);border:1px solid var(--border)">🖼 Choose from Library</button>
       </div>
       <p style="margin-top:12px;font-size:12px;color:var(--text-dim)">
-        After Google Lens identifies your pin, copy the name and paste it into the search box.
+        AI will read the pin and fill in the search box automatically.
       </p>
     </div>
     <button class="modal-close" onclick="closeModal('camera-modal')">Cancel</button>
+  </div>
+</div>
+
+<!-- AI IDENTIFYING MODAL -->
+<div class="modal-overlay" id="identifying-modal">
+  <div class="modal" style="text-align:center;padding:32px 20px">
+    <div style="font-size:36px;margin-bottom:12px">🔍</div>
+    <div style="font-family:'Playfair Display',serif;font-size:18px;margin-bottom:8px">Identifying Pin…</div>
+    <div style="font-size:13px;color:var(--text-dim);margin-bottom:20px">AI is analysing your image</div>
+    <div class="loader-ring" style="margin:0 auto"></div>
   </div>
 </div>
 
@@ -1216,33 +1225,73 @@ function openGallery() {
   document.getElementById('gallery-input').click();
 }
 
-function openGoogleLens() {
-  closeModal('camera-modal');
-  window.open('https://lens.google.com', '_blank');
-  document.getElementById('lens-hint').style.display = 'block';
-  document.getElementById('lens-hint').innerHTML =
-    '🔍 <strong>Google Lens opened</strong> — identify your pin, then come back, paste the name above, and tap Search.';
-}
-
-function handleImageFile(e) {
+async function handleImageFile(e) {
   const file = e.target.files[0];
   if (!file) return;
+  e.target.value = '';
+
+  // Show image preview immediately
   const reader = new FileReader();
-  reader.onload = ev => {
-    currentImage = ev.target.result;
-    document.getElementById('image-preview').src = currentImage;
+  reader.onload = async ev => {
+    const base64 = ev.target.result; // full data URL
+    const base64Data = base64.split(',')[1];
+
+    // Show preview
+    currentImage = base64;
+    document.getElementById('image-preview').src = base64;
     document.getElementById('image-preview-wrap').style.display = 'block';
-    document.getElementById('search-btn').disabled = false;
-    // Suggest search term from filename
-    const name = file.name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ');
-    if (!document.getElementById('search-input').value) {
-      document.getElementById('search-input').value = 'Disney pin ' + name;
-      document.getElementById('search-clear').style.display = 'block';
+
+    // Show identifying modal
+    openModal('identifying-modal');
+
+    try {
+      const pinName = await identifyPinWithClaude(base64Data);
+      closeModal('identifying-modal');
+      if (pinName) {
+        document.getElementById('search-input').value = pinName;
+        document.getElementById('search-clear').style.display = 'block';
+        document.getElementById('search-btn').disabled = false;
+        showToast('✓ Pin identified — tap Search to find prices');
+      } else {
+        closeModal('identifying-modal');
+        showToast('Could not identify pin — please type the name');
+        document.getElementById('search-input').focus();
+      }
+    } catch(err) {
+      closeModal('identifying-modal');
+      showToast('Identification failed — please type the pin name');
+      console.error('Vision error:', err);
     }
-    showToast('Image ready — tap Search to look up prices');
   };
   reader.readAsDataURL(file);
-  e.target.value = '';
+}
+
+async function identifyPinWithClaude(base64Data) {
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'claude-opus-4-5',
+      max_tokens: 200,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/jpeg', data: base64Data }
+          },
+          {
+            type: 'text',
+            text: 'This is a Disney collectible trading pin. Identify it as precisely as possible. Respond with ONLY the pin name/description suitable for an eBay search — no explanation, no punctuation, just the search terms. Example responses: "Haunted Mansion Hitchhiking Ghosts 2019" or "Marie Aristocats cat nap sleeping" or "Mickey Mouse club 50th anniversary".'
+          }
+        ]
+      }]
+    })
+  });
+
+  if (!resp.ok) throw new Error('Vision API error ' + resp.status);
+  const data = await resp.json();
+  return data.content?.[0]?.text?.trim() || null;
 }
 
 function removeImage() {
@@ -1361,10 +1410,22 @@ function displayResults(query, sold, active, resetPage) {
   const hasData = sold.length > 0 || active.length > 0;
   if (!hasData) { area.innerHTML = buildSetupPrompt(query); return; }
 
-  // Apply date filter to sold
-  let filteredSold = sold;
+  // ── Tag "fewer words" items by checking title relevance ──
+  // Items where fewer than half the query words appear in the title are flagged
+  const queryWords = query.toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(w => w.length > 2);
+  function isFewWords(item) {
+    if (!queryWords.length) return false;
+    const t = item.title.toLowerCase();
+    const matches = queryWords.filter(w => t.includes(w)).length;
+    return matches < Math.ceil(queryWords.length / 2);
+  }
+
+  const soldTagged = sold.map(i => ({ ...i, fewerWords: isFewWords(i) }));
+
+  // Apply date filter
+  let filteredSold = soldTagged;
   if (filterFrom || filterTo) {
-    filteredSold = sold.filter(i => {
+    filteredSold = soldTagged.filter(i => {
       if (!i.date) return true;
       const d = new Date(i.date);
       if (filterFrom && d < new Date(filterFrom)) return false;
@@ -1373,9 +1434,12 @@ function displayResults(query, sold, active, resetPage) {
     });
   }
 
-  // Items shown in listing section depend on viewMode
-  const soldForStats  = filteredSold;
-  const mergedItems   = [...filteredSold, ...active].sort((a,b) => {
+  // Stats use ONLY primary matches (no fewer-words items)
+  const primarySold   = filteredSold.filter(i => !i.fewerWords);
+  const soldForStats  = primarySold.length > 0 ? primarySold : filteredSold;
+  const fewWordsCount = filteredSold.filter(i => i.fewerWords).length;
+
+  const mergedItems = [...filteredSold, ...active].sort((a,b) => {
     if (a.sold && !b.sold) return -1;
     if (!a.sold && b.sold) return  1;
     return 0;
@@ -1388,9 +1452,9 @@ function displayResults(query, sold, active, resetPage) {
   const value      = estimateValue(soldForStats.length ? soldForStats : active);
   const minP       = allPrices.length ? Math.min(...allPrices) : 0;
   const maxP       = allPrices.length ? Math.max(...allPrices) : 0;
-  const avgSold    = calcAverage(filteredSold);
+  const avgSold    = calcAverage(soldForStats);
   const avgActive  = calcAverage(active);
-  const confidence = Math.min(100, filteredSold.length * 7);
+  const confidence = Math.min(100, soldForStats.length * 7);
   const buckets    = buildBuckets(allPrices);
 
   const totalPages = Math.max(1, Math.ceil(listItems.length / PAGE_SIZE));
@@ -1404,21 +1468,21 @@ function displayResults(query, sold, active, resetPage) {
   html += `<div class="section-label">Estimated Value</div>`;
   html += `<div class="value-card">
     <div class="value-pin-name">${escHtml(query)}</div>
-    <div class="value-meta">${filteredSold.length ? `Median of ${filteredSold.length} sold listing${filteredSold.length!==1?'s':''}` : `Based on ${active.length} active listing${active.length!==1?'s':''}`}${filterFrom||filterTo?' (filtered)':''}</div>
+    <div class="value-meta">${soldForStats.length ? `Median of ${soldForStats.length} primary match${soldForStats.length!==1?'es':''}` : `Based on ${active.length} active listing${active.length!==1?'s':''}`}${fewWordsCount>0?` <span style="color:var(--text-faint);font-size:11px">(+${fewWordsCount} partial matches excluded from stats)</span>`:''}${filterFrom||filterTo?' (filtered)':''}</div>
     <div class="value-main">
       <div class="value-price">${value ? fmtPrice(value) : '—'}</div>
-      <div class="value-label">${filteredSold.length ? 'Median sold' : 'Est. from listings'}</div>
+      <div class="value-label">${soldForStats.length ? 'Median sold' : 'Est. from listings'}</div>
     </div>
     ${minP&&maxP ? `<div class="value-range">Range: <span>${fmtPrice(minP)}</span> — <span>${fmtPrice(maxP)}</span></div>` : ''}
     <div class="confidence-bar-wrap"><div class="confidence-bar" style="width:${confidence}%"></div></div>
-    <div class="confidence-label">Confidence: ${confidence<30?'Low':confidence<70?'Medium':'High'} · ${filteredSold.length} sold, ${active.length} listed</div>
+    <div class="confidence-label">Confidence: ${confidence<30?'Low':confidence<70?'Medium':'High'} · ${soldForStats.length} primary sold, ${active.length} listed</div>
   </div>`;
 
   // ── Stats row ──
   html += `<div class="stats-row">
     <div class="stat-chip">
-      <span class="stat-chip-val">${filteredSold.length}</span>
-      <span class="stat-chip-lbl">Sold</span>
+      <span class="stat-chip-val">${soldForStats.length}</span>
+      <span class="stat-chip-lbl">Sold (primary)</span>
     </div>
     <div class="stat-chip">
       <span class="stat-chip-val" style="color:var(--green)">${avgSold ? fmtPrice(avgSold) : '—'}</span>
@@ -1430,18 +1494,25 @@ function displayResults(query, sold, active, resetPage) {
     </div>
   </div>`;
 
-  // ── Price distribution (sold only) ──
+  // ── Price distribution (primary sold only, log-scale buckets) ──
   if (buckets.length > 1) {
-    html += `<div class="section-label" style="margin-top:6px">Price Distribution (Sold)</div>`;
+    html += `<div class="section-label" style="margin-top:6px">Price Distribution <span style="color:var(--text-faint);font-size:10px">(primary matches only)</span></div>`;
     html += `<div class="value-card" style="padding:14px 16px">`;
-    html += `<div style="display:flex;align-items:flex-end;gap:4px;height:44px;margin-bottom:6px">`;
-    const maxCount = Math.max(...buckets.map(b=>b.count));
+    html += `<div style="display:flex;align-items:flex-end;gap:3px;height:52px;margin-bottom:8px">`;
+    const maxCount = Math.max(...buckets.map(b => b.count));
     buckets.forEach(b => {
-      const h = maxCount ? Math.max(4, Math.round((b.count/maxCount)*44)) : 4;
-      html += `<div style="flex:1"><div style="width:100%;height:${h}px;background:var(--gold);border-radius:3px 3px 0 0;opacity:${0.4+0.6*(b.count/maxCount)}"></div></div>`;
+      const pct = maxCount > 0 ? b.count / maxCount : 0;
+      const h   = Math.max(3, Math.round(pct * 52));
+      const mid = (b.from + b.to) / 2;
+      html += `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px" title="${fmtPrice(b.from)}–${fmtPrice(b.to)}: ${b.count} item${b.count!==1?'s':''}">
+        <div style="font-size:9px;color:var(--text-faint);font-family:'DM Mono',monospace;min-height:12px">${b.count||''}</div>
+        <div style="width:100%;height:${h}px;background:var(--gold);border-radius:3px 3px 0 0;opacity:${0.35+0.65*pct}"></div>
+      </div>`;
     });
-    html += `</div><div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-dim);font-family:'DM Mono',monospace">`;
-    html += `<span>${fmtPriceShort(minP)}</span><span>${fmtPriceShort(maxP)}</span></div></div>`;
+    html += `</div>`;
+    html += `<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-dim);font-family:'DM Mono',monospace">`;
+    html += `<span>${fmtPrice(minP)}</span><span>${fmtPrice(maxP)}</span></div>`;
+    html += `</div>`;
   }
 
   // ── View toggle ──
@@ -1451,7 +1522,7 @@ function displayResults(query, sold, active, resetPage) {
     <button class="view-btn ${viewMode==='merged'?'active':''}" onclick="setViewMode('merged')">⚪ All (${mergedItems.length})</button>
   </div>`;
 
-  // ── Date filter (sold/merged only) ──
+  // ── Date filter ──
   if (viewMode !== 'active') {
     html += `<div class="date-filter">
       <label>From</label>
@@ -1465,19 +1536,18 @@ function displayResults(query, sold, active, resetPage) {
   // ── Listing rows ──
   html += `<div class="value-card" style="padding:8px 14px;margin-top:6px">`;
   if (pageItems.length === 0) {
-    html += `<div style="padding:16px 0;text-align:center;color:var(--text-dim);font-size:13px">
-      No ${viewMode === 'active' ? 'active listings' : 'sold items'} found${filterFrom||filterTo?' for this date range':''}.
-    </div>`;
+    html += `<div style="padding:16px 0;text-align:center;color:var(--text-dim);font-size:13px">No items found${filterFrom||filterTo?' for this date range':''}.</div>`;
   }
   pageItems.forEach(item => {
-    const isSold = item.sold;
-    const d    = item.date ? new Date(item.date).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}) : '';
-    const isHigh = value && item.price > value * 1.3;
-    const isLow  = value && item.price < value * 0.7;
-    const thumb  = item.image || '';
-    const mktBadge = item.marketplace && item.marketplace !== 'EBAY_US'
+    const isSold    = item.sold;
+    const isFewer   = item.fewerWords;
+    const d         = item.date ? new Date(item.date).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}) : '';
+    const isHigh    = !isFewer && value && item.price > value * 1.4;
+    const isLow     = !isFewer && value && item.price < value * 0.6;
+    const thumb     = item.image || '';
+    const mktBadge  = item.marketplace && item.marketplace !== 'EBAY_US'
       ? ` · <span style="color:var(--gold);font-size:10px">${item.marketplace.replace('EBAY_','')}</span>` : '';
-    html += `<div class="listing-row" ${item.url?`onclick="window.open('${escAttr(item.url)}','_blank')" style="cursor:pointer"`:''}>
+    html += `<div class="listing-row" style="opacity:${isFewer?'0.55':'1'};${item.url?'cursor:pointer':''}" ${item.url?`onclick="window.open('${escAttr(item.url)}','_blank')"`:''}}>
       ${thumb
         ? `<img class="listing-thumb" src="${escHtml(thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'listing-thumb-placeholder',textContent:'📌'}))" />`
         : `<div class="listing-thumb-placeholder">📌</div>`}
@@ -1485,11 +1555,12 @@ function displayResults(query, sold, active, resetPage) {
         <div class="listing-title">${escHtml(item.title.substring(0,55))}</div>
         <div class="listing-date">
           ${isSold ? '<span style="color:var(--green);font-size:10px">SOLD</span>' : '<span style="color:var(--teal);font-size:10px">LISTED</span>'}
+          ${isFewer ? ' · <span style="color:var(--text-faint);font-size:10px">partial match</span>' : ''}
           ${d ? ' · '+d : ''}${item.condition?' · '+item.condition:''}${mktBadge}
         </div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex-shrink:0">
-        <div class="listing-price ${isSold?'sold-price':'active-price'}">${fmtPrice(item.price)}</div>
+        <div class="listing-price ${isSold?'sold-price':'active-price'}" style="${isFewer?'color:var(--text-dim)':''}">${fmtPrice(item.price)}</div>
         ${isHigh?'<div style="font-size:9px;color:var(--gold);font-family:\'DM Mono\',monospace">HIGH</div>':''}
         ${isLow ?'<div style="font-size:9px;color:var(--teal);font-family:\'DM Mono\',monospace">LOW</div>'  :''}
       </div>
@@ -1499,8 +1570,9 @@ function displayResults(query, sold, active, resetPage) {
 
   // Averages footer
   if (viewMode === 'sold' && avgSold) {
-    html += `<div style="display:flex;justify-content:flex-end;padding:4px 4px 0;font-size:12px;color:var(--text-dim)">
-      Avg sold: <span style="color:var(--green);margin-left:6px;font-family:'DM Mono',monospace">${fmtPrice(avgSold)}</span>
+    html += `<div style="display:flex;justify-content:space-between;padding:4px 4px 0;font-size:12px;color:var(--text-dim)">
+      <span>Avg (primary only)</span>
+      <span style="color:var(--green);font-family:'DM Mono',monospace">${fmtPrice(avgSold)}</span>
     </div>`;
   } else if (viewMode === 'active' && avgActive) {
     html += `<div style="display:flex;justify-content:flex-end;padding:4px 4px 0;font-size:12px;color:var(--text-dim)">
@@ -1548,10 +1620,19 @@ function buildBuckets(prices) {
   if (prices.length < 2) return [];
   const min = Math.min(...prices), max = Math.max(...prices);
   if (min === max) return [];
-  const n = Math.min(8, prices.length);
+  // Use up to 10 buckets, but scale to data density
+  const n    = Math.min(10, Math.max(4, Math.ceil(prices.length / 5)));
   const size = (max - min) / n;
-  const buckets = Array.from({length: n}, (_,i) => ({ from: min+i*size, to: min+(i+1)*size, count: 0 }));
-  prices.forEach(p => { const i = Math.min(n-1, Math.floor((p-min)/size)); buckets[i].count++; });
+  if (size === 0) return [];
+  const buckets = Array.from({length: n}, (_, i) => ({
+    from: min + i * size,
+    to:   min + (i + 1) * size,
+    count: 0
+  }));
+  prices.forEach(p => {
+    const idx = Math.min(n - 1, Math.floor((p - min) / size));
+    buckets[idx].count++;
+  });
   return buckets;
 }
 
