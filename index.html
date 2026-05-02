@@ -868,10 +868,23 @@
           <input class="settings-input" id="proxy-url" type="url"
             placeholder="https://pinscout.YOUR-NAME.workers.dev" autocomplete="off" />
           <div class="settings-note">
-            Your Cloudflare Worker URL. The Worker handles your eBay credentials securely —
-            your App ID and Cert ID are stored in the Worker's environment variables, not here.
+            Your Cloudflare Worker URL. eBay App ID and Cert ID are stored
+            as environment variables inside the Worker — not here.
           </div>
           <div id="api-status"></div>
+        </div>
+        <div class="settings-row">
+          <label>RapidAPI Key</label>
+          <input class="settings-input" id="scrapechain-key" type="text"
+            placeholder="your-rapidapi-key" autocomplete="off" />
+          <div class="settings-note">
+            Required for sold price history. Get a <strong style="color:var(--teal)">free key</strong> at
+            <a href="https://rapidapi.com/ecommet/api/ebay-average-selling-price" target="_blank" style="color:var(--teal)">rapidapi.com</a>
+            — search for <strong style="color:var(--text)">"eBay Average Selling Price"</strong>, subscribe to the free tier, and copy your key.<br/><br/>
+            Paste the key here <strong style="color:var(--text)">and</strong> add it as
+            <span style="color:var(--gold);font-family:'DM Mono',monospace">RAPIDAPI_KEY</span>
+            in your Cloudflare Worker (Settings → Variables).
+          </div>
         </div>
         <button class="settings-save" onclick="saveSettings()">Save Settings</button>
         <button class="settings-save" style="margin-top:8px;background:var(--surface2);color:var(--teal);border:1px solid rgba(62,207,207,0.3)" onclick="testConnection()">🔌 Test Connection</button>
@@ -884,12 +897,10 @@
         <div class="settings-row">
           <div class="settings-note">
             📷 <strong style="color:var(--text)">How image search works:</strong><br/><br/>
-            Tap the camera icon on the Search tab. The app will open
-            <strong style="color:var(--teal)">Google Lens</strong> with your photo.
-            Google Lens will identify the pin — copy that name, then
-            come back here and paste it into the search box.<br/><br/>
-            Once your eBay API key arrives, the app will use AI to attempt
-            automatic pin identification without leaving the app.
+            Tap the camera icon on the Search tab. Take a photo or choose
+            from your library — the app will pre-fill a search term from the filename.<br/><br/>
+            Tap <strong style="color:var(--teal)">Open Google Lens</strong> to identify an unknown pin,
+            then copy the name back into the search box.
           </div>
         </div>
       </div>
@@ -977,7 +988,8 @@ function loadSettings() {
   try {
     settings = JSON.parse(localStorage.getItem('pinscout_settings') || '{}');
   } catch(e) { settings = {}; }
-  if (settings.proxyUrl) document.getElementById('proxy-url').value = settings.proxyUrl;
+  if (settings.proxyUrl)      document.getElementById('proxy-url').value       = settings.proxyUrl;
+  if (settings.scrapeChainKey) document.getElementById('scrapechain-key').value = settings.scrapeChainKey;
   if (settings.currency) { activeCurrency = settings.currency; updateCurrencyUI(); }
   updateApiStatus();
   updateHistoryCount();
@@ -1036,15 +1048,21 @@ function fmtPriceShort(usdPrice) {
 function updateApiStatus() {
   const statusEl = document.getElementById('api-status');
   if (!statusEl) return;
-  if (settings.proxyUrl) {
-    statusEl.innerHTML = '<div class="status-pill ok"><span class="status-dot"></span>Proxy URL saved — tap Test Connection to verify</div>';
+  const hasProxy = !!settings.proxyUrl;
+  const hasKey   = !!settings.scrapeChainKey;
+  if (hasProxy && hasKey) {
+    statusEl.innerHTML = '<div class="status-pill ok"><span class="status-dot"></span>All set — proxy + RapidAPI key saved</div>';
+  } else if (hasProxy && !hasKey) {
+    statusEl.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>Proxy saved — add RapidAPI key for sold data</div>';
   } else {
-    statusEl.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>No proxy URL — see setup guide</div>';
+    statusEl.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>Not configured — enter Proxy URL and RapidAPI key</div>';
   }
 }
 
 function saveSettings() {
-  settings.proxyUrl = document.getElementById('proxy-url').value.trim().replace(/\/$/, '');
+  settings.proxyUrl       = document.getElementById('proxy-url').value.trim().replace(/\/$/, '');
+  settings.scrapeChainKey = document.getElementById('scrapechain-key').value.trim();
+  settings.currency       = activeCurrency;
   localStorage.setItem('pinscout_settings', JSON.stringify(settings));
   updateApiStatus();
   showToast('Settings saved ✓');
@@ -1098,22 +1116,42 @@ async function runDiagnostic() {
   const proxy = (settings.proxyUrl || '').trim().replace(/\/$/, '');
   const el    = document.getElementById('test-result');
   if (!proxy) { el.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>Enter Proxy URL first</div>'; return; }
-  el.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>Diagnosing — fetching eBay page via Worker…</div>';
+
+  el.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>Testing sold data endpoint…</div>';
+
   try {
-    const resp = await fetch(`${proxy}?q=marie+cat+nap&filter=debug`);
+    const resp = await fetch(`${proxy}?q=mickey+mouse&filter=sold`);
     const data = await resp.json();
-    const lines = [
-      `HTTP OK: ${data.httpOk}`,
-      `HTML length: ${data.htmlLength}`,
-      `Has s-item: ${data.hasItems} (count: ${data.itemCount})`,
-      `Has s-card: ${data.hasCards} (count: ${data.cardCount})`,
-      `CAPTCHA: ${data.hasCaptcha}`,
-      data.error ? `Error: ${data.error}` : '',
-      data.debug ? `Debug: ${data.debug}` : ''
-    ].filter(Boolean).join('\n');
-    const color = data.hasCaptcha ? 'var(--red)' : (data.itemCount > 0 || data.cardCount > 0) ? 'var(--green)' : 'var(--gold)';
-    el.innerHTML = `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-top:8px;font-family:'DM Mono',monospace;font-size:11px;line-height:1.8;color:${color};white-space:pre-wrap;word-break:break-all">${escHtml(lines)}</div>
-    <div style="font-size:11px;color:var(--text-dim);margin-top:8px">Share these results in the chat if sold items still don't appear.</div>`;
+
+    if (data.error && data.source === 'no_key') {
+      el.innerHTML = `<div style="background:rgba(201,168,76,0.1);border:1px solid var(--gold-dim);border-radius:10px;padding:12px;margin-top:8px;font-size:12px;line-height:1.8;color:var(--text)">
+        ⚠️ <strong>RAPIDAPI_KEY missing in Worker</strong><br/>
+        You need to add it as an environment variable in Cloudflare:<br/><br/>
+        1. Go to <strong>dash.cloudflare.com</strong> → Workers & Pages → pinscout<br/>
+        2. Click <strong>Settings → Variables and Secrets</strong><br/>
+        3. Add variable: <span style="color:var(--gold);font-family:'DM Mono',monospace">RAPIDAPI_KEY</span> = your key<br/>
+        4. Click Save and redeploy
+      </div>`;
+      return;
+    }
+
+    if (data.error) {
+      el.innerHTML = `<div style="background:rgba(224,92,92,0.1);border:1px solid rgba(224,92,92,0.3);border-radius:10px;padding:12px;margin-top:8px;font-size:12px;color:var(--text)">
+        ❌ <strong>Error from Worker:</strong><br/><span style="font-family:'DM Mono',monospace;font-size:11px">${escHtml(data.error)}</span>
+      </div>`;
+      return;
+    }
+
+    const count = (data.items || []).length;
+    const src   = data.source || 'unknown';
+    const color = count > 0 ? 'var(--green)' : 'var(--gold)';
+    el.innerHTML = `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px;margin-top:8px;font-family:'DM Mono',monospace;font-size:11px;line-height:1.8;color:${color}">
+      Source: ${escHtml(src)}\nItems returned: ${count}\nDebug: ${escHtml(data.debug||'—')}
+    </div>
+    <div style="font-size:12px;color:var(--text-dim);margin-top:8px">
+      ${count > 0 ? '✅ Sold data is working! Go search a pin.' : '⚠️ 0 items returned — check ScrapeChain key is correct in Cloudflare Variables.'}
+    </div>`;
+
   } catch(err) {
     el.innerHTML = `<div class="status-pill warn" style="white-space:normal;border-radius:10px;padding:10px"><span class="status-dot"></span>${escHtml(err.message)}</div>`;
   }
@@ -1224,28 +1262,33 @@ async function doSearch() {
   const searchTerm = query || 'Disney pin';
   showLoading();
 
-  // Re-read settings fresh from localStorage every search (catches saves made this session)
+  // Re-read settings fresh from localStorage every search
   try { settings = JSON.parse(localStorage.getItem('pinscout_settings') || '{}'); } catch(e) {}
 
   const proxy = (settings.proxyUrl || '').trim().replace(/\/$/, '');
 
   if (!proxy) {
-    showError(searchTerm, 'No Proxy URL found. Please go to Settings, enter your Cloudflare Worker URL, and tap Save.');
+    showError(searchTerm, 'No Proxy URL found. Go to Settings and enter your Cloudflare Worker URL.');
     return;
   }
 
+  if (!settings.scrapeChainKey) {
+    // Can still search active listings, just warn about sold
+    showToast('⚠️ No ScrapeChain key — sold data unavailable');
+  }
+
   try {
-    await searchViaProxy(searchTerm, proxy, null);
+    await searchViaProxy(searchTerm, proxy);
   } catch(err) {
     console.error('Search error:', err);
     showError(searchTerm, err.message);
   }
 }
 
-async function searchViaProxy(query, proxy, appId) {
+async function searchViaProxy(query, proxy) {
   const [sold, active] = await Promise.allSettled([
-    fetchViaProxy(query, true,  proxy, appId),
-    fetchViaProxy(query, false, proxy, appId)
+    fetchViaProxy(query, true,  proxy),
+    fetchViaProxy(query, false, proxy)
   ]);
 
   if (sold.status === 'rejected' && active.status === 'rejected') {
@@ -1263,7 +1306,7 @@ async function searchViaProxy(query, proxy, appId) {
   saveToHistory(query, value, soldItems.length);
 }
 
-async function fetchViaProxy(query, completedOnly, proxy, appId) {
+async function fetchViaProxy(query, completedOnly, proxy) {
   const filter   = completedOnly ? 'sold' : 'active';
   const proxyUrl = `${proxy}?q=${encodeURIComponent(query)}&filter=${filter}`;
 
