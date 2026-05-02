@@ -99,6 +99,11 @@ async function fetchSoldViaRapidAPI(query) {
     throw new Error(`RapidAPI: ${data.message}`);
   }
 
+  // Capture quota headers RapidAPI sends back
+  const quotaRemaining = resp.headers.get('x-ratelimit-requests-remaining');
+  const quotaLimit     = resp.headers.get('x-ratelimit-requests-limit');
+  const quotaReset     = resp.headers.get('x-ratelimit-requests-reset');
+
   const products = data.products || [];
   const items = products.map(p => {
     const price = parseFloat(p.sale_price || 0);
@@ -118,13 +123,16 @@ async function fetchSoldViaRapidAPI(query) {
 
   return {
     items,
-    total:        items.length,
-    avg_price:    data.average_price  || null,
-    median_price: data.median_price   || null,
-    min_price:    data.min_price      || null,
-    max_price:    data.max_price      || null,
-    response_url: data.response_url   || null,
-    source:       'rapidapi'
+    total:           items.length,
+    avg_price:       data.average_price  || null,
+    median_price:    data.median_price   || null,
+    min_price:       data.min_price      || null,
+    max_price:       data.max_price      || null,
+    response_url:    data.response_url   || null,
+    quota_remaining: quotaRemaining !== null ? parseInt(quotaRemaining) : null,
+    quota_limit:     quotaLimit     !== null ? parseInt(quotaLimit)     : null,
+    quota_reset_sec: quotaReset     !== null ? parseInt(quotaReset)     : null,
+    source:          'rapidapi'
   };
 }
 

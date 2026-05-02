@@ -906,6 +906,13 @@
       </div>
 
       <div class="settings-section">
+        <div class="settings-section-title">RapidAPI Usage</div>
+        <div class="settings-row" id="quota-display">
+          <div class="settings-note" id="quota-text">Run a search to check your remaining quota.</div>
+        </div>
+      </div>
+
+      <div class="settings-section">
         <div class="settings-section-title">Data & Storage</div>
         <div class="settings-row">
           <div class="settings-note">
@@ -943,26 +950,20 @@
   <div class="modal">
     <div class="modal-title">📷 Search by Image</div>
     <div class="modal-body">
-      <p style="margin-bottom:14px;color:var(--text)">Take or choose a photo of your pin — AI will identify it and search prices automatically.</p>
+      <p style="margin-bottom:14px;color:var(--text)">Two options to identify a pin by photo:</p>
       <div style="display:flex;flex-direction:column;gap:8px">
-        <button class="btn-primary" onclick="openCamera()" style="margin-top:0">📷 Take Photo</button>
+        <button class="btn-primary" onclick="openGoogleLensUpload()" style="margin-top:0">🔍 Open Google Lens</button>
+        <button class="btn-primary" onclick="openCamera()" style="margin-top:0;background:var(--surface2);color:var(--text);border:1px solid var(--border)">📷 Take Photo (fills search)</button>
         <button class="btn-primary" onclick="openGallery()" style="margin-top:0;background:var(--surface2);color:var(--text);border:1px solid var(--border)">🖼 Choose from Library</button>
       </div>
-      <p style="margin-top:12px;font-size:12px;color:var(--text-dim)">
-        AI will read the pin and fill in the search box automatically.
-      </p>
+      <div style="margin-top:14px;padding:12px;background:var(--surface2);border-radius:10px;font-size:12px;color:var(--text-dim);line-height:1.7">
+        <strong style="color:var(--text)">Google Lens (recommended):</strong><br/>
+        Opens Google Lens where you can take/upload a photo. It will identify the pin — copy the name, come back and paste it in the search box.<br/><br/>
+        <strong style="color:var(--text)">Take Photo / Library:</strong><br/>
+        Takes a photo and uses the filename as a search hint. Works best if you rename the file to the pin name first.
+      </div>
     </div>
     <button class="modal-close" onclick="closeModal('camera-modal')">Cancel</button>
-  </div>
-</div>
-
-<!-- AI IDENTIFYING MODAL -->
-<div class="modal-overlay" id="identifying-modal">
-  <div class="modal" style="text-align:center;padding:32px 20px">
-    <div style="font-size:36px;margin-bottom:12px">🔍</div>
-    <div style="font-family:'Playfair Display',serif;font-size:18px;margin-bottom:8px">Identifying Pin…</div>
-    <div style="font-size:13px;color:var(--text-dim);margin-bottom:20px">AI is analysing your image</div>
-    <div class="loader-ring" style="margin:0 auto"></div>
   </div>
 </div>
 
@@ -1003,6 +1004,7 @@ function loadSettings() {
   updateApiStatus();
   updateHistoryCount();
   fetchFxRate();
+  updateQuotaDisplay();
 }
 
 // ── Currency ──
@@ -1121,7 +1123,37 @@ async function testConnection() {
   }
 }
 
-async function runDiagnostic() {
+function updateQuotaDisplay() {
+  const el = document.getElementById('quota-text');
+  if (!el) return;
+  const remaining = settings.quotaRemaining;
+  const limit     = settings.quotaLimit;
+  const resetSec  = settings.quotaResetSec;
+  const updated   = settings.quotaUpdated;
+  if (remaining === undefined || remaining === null) {
+    el.innerHTML = 'Run a search to check your remaining quota.';
+    return;
+  }
+  const pct   = limit ? Math.round((remaining / limit) * 100) : null;
+  const color = remaining === 0 ? 'var(--red)' : remaining < 10 ? 'var(--gold)' : 'var(--green)';
+  const resetDays = resetSec ? Math.ceil(resetSec / 86400) : null;
+  const updatedStr = updated ? new Date(updated).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit'}) : '';
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-size:13px;color:var(--text)">Calls remaining</span>
+      <span style="font-family:'DM Mono',monospace;font-size:18px;color:${color}">${remaining}${limit?` / ${limit}`:''}</span>
+    </div>
+    <div style="height:6px;background:var(--surface2);border-radius:3px;overflow:hidden;margin-bottom:8px">
+      <div style="height:100%;width:${pct||0}%;background:${color};border-radius:3px;transition:width .6s"></div>
+    </div>
+    <div style="font-size:11px;color:var(--text-dim)">
+      ${resetDays ? `Resets in ~${resetDays} day${resetDays!==1?'s':''}` : ''}
+      ${updatedStr ? ` · Last checked ${updatedStr}` : ''}
+    </div>
+    ${remaining === 0 ? `<div style="margin-top:8px;font-size:12px;color:var(--red)">⚠️ Quota exhausted — sold data unavailable until reset. <a href="https://rapidapi.com/ecommet/api/ebay-average-selling-price" target="_blank" style="color:var(--teal)">Upgrade plan →</a></div>` : ''}
+    ${remaining > 0 && remaining < 5 ? `<div style="margin-top:8px;font-size:12px;color:var(--gold)">⚠️ Almost out — consider upgrading at rapidapi.com</div>` : ''}
+  `;
+}
   const proxy = (settings.proxyUrl || '').trim().replace(/\/$/, '');
   const el    = document.getElementById('test-result');
   if (!proxy) { el.innerHTML = '<div class="status-pill warn"><span class="status-dot"></span>Enter Proxy URL first</div>'; return; }
@@ -1225,73 +1257,43 @@ function openGallery() {
   document.getElementById('gallery-input').click();
 }
 
-async function handleImageFile(e) {
+function openGoogleLensUpload() {
+  closeModal('camera-modal');
+  // Open Google Lens — on iPhone this opens the Lens app or mobile site
+  // where user can take/upload photo and get identification
+  window.open('https://lens.google.com/upload', '_blank');
+  // Show a hint to paste the result back
+  setTimeout(() => {
+    document.getElementById('lens-hint').style.display = 'block';
+    document.getElementById('lens-hint').innerHTML =
+      '🔍 <strong style="color:var(--text)">Google Lens opened</strong> — take or upload a photo of your pin, copy the identified name, then paste it into the search box above and tap Search.';
+  }, 500);
+}
+
+function handleImageFile(e) {
   const file = e.target.files[0];
   if (!file) return;
   e.target.value = '';
 
-  // Show image preview immediately
   const reader = new FileReader();
-  reader.onload = async ev => {
-    const base64 = ev.target.result; // full data URL
-    const base64Data = base64.split(',')[1];
-
-    // Show preview
-    currentImage = base64;
-    document.getElementById('image-preview').src = base64;
+  reader.onload = ev => {
+    currentImage = ev.target.result;
+    document.getElementById('image-preview').src = currentImage;
     document.getElementById('image-preview-wrap').style.display = 'block';
+    document.getElementById('search-btn').disabled = false;
 
-    // Show identifying modal
-    openModal('identifying-modal');
-
-    try {
-      const pinName = await identifyPinWithClaude(base64Data);
-      closeModal('identifying-modal');
-      if (pinName) {
-        document.getElementById('search-input').value = pinName;
-        document.getElementById('search-clear').style.display = 'block';
-        document.getElementById('search-btn').disabled = false;
-        showToast('✓ Pin identified — tap Search to find prices');
-      } else {
-        closeModal('identifying-modal');
-        showToast('Could not identify pin — please type the name');
-        document.getElementById('search-input').focus();
-      }
-    } catch(err) {
-      closeModal('identifying-modal');
-      showToast('Identification failed — please type the pin name');
-      console.error('Vision error:', err);
+    // Use filename as search hint (works well if saved from eBay or named sensibly)
+    const rawName = file.name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ').replace(/\d{4,}/g, '').trim();
+    const current = document.getElementById('search-input').value.trim();
+    if (!current && rawName.length > 3) {
+      document.getElementById('search-input').value = rawName;
+      document.getElementById('search-clear').style.display = 'block';
+      showToast('📷 Image loaded — edit the search term if needed, then tap Search');
+    } else {
+      showToast('📷 Image loaded — tap Search to find prices');
     }
   };
   reader.readAsDataURL(file);
-}
-
-async function identifyPinWithClaude(base64Data) {
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'claude-opus-4-5',
-      max_tokens: 200,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: 'image/jpeg', data: base64Data }
-          },
-          {
-            type: 'text',
-            text: 'This is a Disney collectible trading pin. Identify it as precisely as possible. Respond with ONLY the pin name/description suitable for an eBay search — no explanation, no punctuation, just the search terms. Example responses: "Haunted Mansion Hitchhiking Ghosts 2019" or "Marie Aristocats cat nap sleeping" or "Mickey Mouse club 50th anniversary".'
-          }
-        ]
-      }]
-    })
-  });
-
-  if (!resp.ok) throw new Error('Vision API error ' + resp.status);
-  const data = await resp.json();
-  return data.content?.[0]?.text?.trim() || null;
 }
 
 function removeImage() {
@@ -1348,6 +1350,16 @@ async function searchViaProxy(query, proxy) {
   const activeResult= active.status === 'fulfilled' ? active.value : { items: [] };
   const soldItems   = soldResult.items   || [];
   const activeItems = activeResult.items || [];
+
+  // Store quota info for display in Settings
+  if (soldResult.quota_remaining !== undefined && soldResult.quota_remaining !== null) {
+    settings.quotaRemaining = soldResult.quota_remaining;
+    settings.quotaLimit     = soldResult.quota_limit;
+    settings.quotaResetSec  = soldResult.quota_reset_sec;
+    settings.quotaUpdated   = new Date().toISOString();
+    localStorage.setItem('pinscout_settings', JSON.stringify(settings));
+    updateQuotaDisplay();
+  }
 
   displayResults(query, soldItems, activeItems, true);
   if (soldResult.debug) showDebugInResults(soldResult.debug);
@@ -1410,17 +1422,24 @@ function displayResults(query, sold, active, resetPage) {
   const hasData = sold.length > 0 || active.length > 0;
   if (!hasData) { area.innerHTML = buildSetupPrompt(query); return; }
 
-  // ── Tag "fewer words" items by checking title relevance ──
-  // Items where fewer than half the query words appear in the title are flagged
+  // ── Tag "fewer words" items — require ALL query words to appear in title ──
   const queryWords = query.toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(w => w.length > 2);
   function isFewWords(item) {
     if (!queryWords.length) return false;
     const t = item.title.toLowerCase();
-    const matches = queryWords.filter(w => t.includes(w)).length;
-    return matches < Math.ceil(queryWords.length / 2);
+    // Partial match = any query word is missing from the title
+    return queryWords.some(w => !t.includes(w));
   }
 
-  const soldTagged = sold.map(i => ({ ...i, fewerWords: isFewWords(i) }));
+  // Sort sold by date descending (most recent first) before tagging
+  const soldSorted = [...sold].sort((a, b) => {
+    if (!a.date && !b.date) return 0;
+    if (!a.date) return 1;
+    if (!b.date) return -1;
+    return new Date(b.date) - new Date(a.date);
+  });
+
+  const soldTagged = soldSorted.map(i => ({ ...i, fewerWords: isFewWords(i) }));
 
   // Apply date filter
   let filteredSold = soldTagged;
