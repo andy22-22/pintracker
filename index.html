@@ -1365,8 +1365,9 @@ async function searchViaProxy(query, proxy) {
 
   displayResults(query, soldItems, activeItems, true);
   if (soldResult.debug) showDebugInResults(soldResult.debug);
-  const value = estimateValue(soldItems.length ? soldItems : activeItems);
-  saveToHistory(query, value, soldItems.length);
+  // Use the value already computed by displayResults (tiered/relevance-filtered)
+  const savedValue = currentResults ? currentResults.value : null;
+  saveToHistory(query, savedValue, soldItems.length);
 }
 
 async function fetchViaProxy(query, completedOnly, proxy) {
@@ -1502,17 +1503,32 @@ function displayResults(query, sold, active, resetPage) {
   // List order: high first, then mid, then low (each group sorted by date already)
   const orderedSold = [...filteredHigh, ...filteredMid, ...filteredLow];
 
-  const mergedItems = [...orderedSold, ...active];
+  // Apply same relevance scoring to active listings
+  const activeScored = active.map(i => ({ ...i, relevance: scoreItem(i), matchTier: 'active' }));
+  activeScored.forEach(i => {
+    i.matchTier = i.relevance >= 60 ? 'high' : i.relevance >= 30 ? 'mid' : 'low';
+    i.fewerWords = i.relevance < 60;
+  });
+  const activeHigh = activeScored.filter(i => i.matchTier === 'high');
+  const activeMid  = activeScored.filter(i => i.matchTier === 'mid');
+  const activeLow  = activeScored.filter(i => i.matchTier === 'low');
+  // Stats for active: high only, fall back to mid
+  const activeForStats = activeHigh.length > 0 ? activeHigh
+                       : activeMid.length  > 0 ? activeMid
+                       : activeScored;
+  const orderedActive = [...activeHigh, ...activeMid, ...activeLow];
+
+  const mergedItems = [...orderedSold, ...orderedActive];
   const listItems   = viewMode === 'sold'   ? orderedSold
-                    : viewMode === 'active' ? active
+                    : viewMode === 'active' ? orderedActive
                     : mergedItems;
 
   const allPrices  = soldForStats.map(i => i.price);
-  const value      = estimateValue(soldForStats.length ? soldForStats : active);
+  const value      = estimateValue(soldForStats.length ? soldForStats : activeForStats);
   const minP       = allPrices.length ? Math.min(...allPrices) : 0;
   const maxP       = allPrices.length ? Math.max(...allPrices) : 0;
   const avgSold    = calcAverage(soldForStats);
-  const avgActive  = calcAverage(active);
+  const avgActive  = calcAverage(activeForStats);
   const confidence = Math.min(100, soldForStats.length * 7);
   const buckets    = buildBuckets(allPrices);
 
@@ -1554,7 +1570,7 @@ function displayResults(query, sold, active, resetPage) {
     </div>
     <div class="stat-chip">
       <span class="stat-chip-val" style="color:var(--teal)">${avgActive ? fmtPrice(avgActive) : '—'}</span>
-      <span class="stat-chip-lbl">Avg Listed</span>
+      <span class="stat-chip-lbl">Avg Listed${activeHigh.length > 0 ? ' ✓' : ''}</span>
     </div>
   </div>`;
 
@@ -1581,8 +1597,8 @@ function displayResults(query, sold, active, resetPage) {
 
   // ── View toggle ──
   html += `<div class="view-toggle">
-    <button class="view-btn ${viewMode==='sold'  ?'active':''}" onclick="setViewMode('sold')">🟢 Sold (${filteredSold.length})</button>
-    <button class="view-btn ${viewMode==='active'?'active':''}" onclick="setViewMode('active')">🔵 Listed (${active.length})</button>
+    <button class="view-btn ${viewMode==='sold'  ?'active':''}" onclick="setViewMode('sold')">🟢 Sold (${orderedSold.length})</button>
+    <button class="view-btn ${viewMode==='active'?'active':''}" onclick="setViewMode('active')">🔵 Listed (${orderedActive.length})</button>
     <button class="view-btn ${viewMode==='merged'?'active':''}" onclick="setViewMode('merged')">⚪ All (${mergedItems.length})</button>
   </div>`;
 
@@ -1607,14 +1623,16 @@ function displayResults(query, sold, active, resetPage) {
     const tier      = item.matchTier || 'high';
     const opacity   = tier === 'high' ? '1' : tier === 'mid' ? '0.7' : '0.4';
     const tierBadge = tier === 'mid'  ? ' · <span style="color:var(--gold);font-size:10px">PARTIAL</span>'
-                    : tier === 'low'  ? ' · <span style="color:var(--text-faint);font-size:10px">POOR MATCH</span>'
+                    : tier === 'low'  ? ' · <span style="color:var(--text-faint);font-size:10px">POOR</span>'
                     : '';
     const d         = item.date ? new Date(item.date).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}) : '';
+    const dateLabel = d ? (isSold ? d : `Listed ${d}`) : '';
     const isHigh    = tier === 'high' && value && item.price > value * 1.4;
     const isLow     = tier === 'high' && value && item.price < value * 0.6;
     const thumb     = item.image || '';
-    const mktBadge  = item.marketplace && item.marketplace !== 'EBAY_US'
-      ? ` · <span style="color:var(--gold);font-size:10px">${item.marketplace.replace('EBAY_','')}</span>` : '';
+    const regionMap = { EBAY_US:'US', EBAY_GB:'UK', EBAY_AU:'AU', EBAY_DE:'DE', EBAY_FR:'FR', EBAY_IT:'IT', EBAY_ES:'ES', EBAY_CA:'CA' };
+    const region    = regionMap[item.marketplace] || (item.marketplace ? item.marketplace.replace('EBAY_','') : 'US');
+    const regionBadge = `<span style="color:var(--gold);font-size:10px;font-family:'DM Mono',monospace;background:rgba(201,168,76,0.12);padding:1px 4px;border-radius:3px">${region}</span>`;
     html += `<div class="listing-row" style="opacity:${opacity};${item.url?'cursor:pointer':''}" ${item.url?`onclick="window.open('${escAttr(item.url)}','_blank')"`:''}}>
       ${thumb
         ? `<img class="listing-thumb" src="${escHtml(thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'listing-thumb-placeholder',textContent:'📌'}))" />`
@@ -1623,8 +1641,8 @@ function displayResults(query, sold, active, resetPage) {
         <div class="listing-title">${escHtml(item.title.substring(0,55))}</div>
         <div class="listing-date">
           ${isSold ? '<span style="color:var(--green);font-size:10px">SOLD</span>' : '<span style="color:var(--teal);font-size:10px">LISTED</span>'}
-          ${tierBadge}
-          ${d ? ' · '+d : ''}${item.condition?' · '+item.condition:''}${mktBadge}
+          &nbsp;${regionBadge}${tierBadge}
+          ${dateLabel ? ' · '+dateLabel : ''}${item.condition?' · '+item.condition:''}
         </div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex-shrink:0">
@@ -1643,8 +1661,9 @@ function displayResults(query, sold, active, resetPage) {
       <span style="color:var(--green);font-family:'DM Mono',monospace">${fmtPrice(avgSold)}</span>
     </div>`;
   } else if (viewMode === 'active' && avgActive) {
-    html += `<div style="display:flex;justify-content:flex-end;padding:4px 4px 0;font-size:12px;color:var(--text-dim)">
-      Avg listed: <span style="color:var(--teal);margin-left:6px;font-family:'DM Mono',monospace">${fmtPrice(avgActive)}</span>
+    html += `<div style="display:flex;justify-content:space-between;padding:4px 4px 0;font-size:12px;color:var(--text-dim)">
+      <span>Avg listed (best matches)</span>
+      <span style="color:var(--teal);font-family:'DM Mono',monospace">${fmtPrice(avgActive)}</span>
     </div>`;
   }
 
