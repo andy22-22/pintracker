@@ -1424,26 +1424,61 @@ function displayResults(query, sold, active, resetPage) {
   const hasData = sold.length > 0 || active.length > 0;
   if (!hasData) { area.innerHTML = buildSetupPrompt(query); return; }
 
-  // ── Tag "fewer words" items — require ALL query words to appear in title ──
-  const queryWords = query.toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(w => w.length > 2);
-  function isFewWords(item) {
-    if (!queryWords.length) return false;
-    const t = item.title.toLowerCase();
-    // Partial match = any query word is missing from the title
-    return queryWords.some(w => !t.includes(w));
+  // ── Relevance scoring ──
+  // Score each item 0-100 based on how closely the title matches the query
+  const queryWords   = query.toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(w => w.length > 1);
+  const queryPhrase  = query.toLowerCase().replace(/[^a-z0-9 ]/g,' ').trim();
+
+  function scoreItem(item) {
+    const t = item.title.toLowerCase().replace(/[^a-z0-9 ]/g,' ');
+    let score = 0;
+
+    // Exact phrase match anywhere in title — strongest signal
+    if (t.includes(queryPhrase)) score += 60;
+
+    // Each query word present
+    const wordMatches = queryWords.filter(w => t.includes(w)).length;
+    score += Math.round((wordMatches / Math.max(queryWords.length, 1)) * 30);
+
+    // Penalise titles that are much longer than the query (likely unrelated bundles/lots)
+    const titleWords = t.split(/\s+/).length;
+    const queryLen   = queryWords.length;
+    if (titleWords > queryLen * 4) score -= 15;
+
+    // Bonus if title starts with query words
+    if (t.startsWith(queryPhrase)) score += 10;
+
+    return Math.max(0, Math.min(100, score));
   }
 
-  // Sort sold by date descending (most recent first) before tagging
-  const soldSorted = [...sold].sort((a, b) => {
+  // Sort sold by relevance first, then date within same relevance band
+  const soldScored = [...sold].map(i => ({ ...i, relevance: scoreItem(i) }));
+  soldScored.sort((a, b) => {
+    // Primary sort: relevance descending
+    if (b.relevance !== a.relevance) return b.relevance - a.relevance;
+    // Secondary: date descending
     if (!a.date && !b.date) return 0;
     if (!a.date) return 1;
     if (!b.date) return -1;
     return new Date(b.date) - new Date(a.date);
   });
 
-  const soldTagged = soldSorted.map(i => ({ ...i, fewerWords: isFewWords(i) }));
+  // Tier items:
+  //   HIGH  (score >= 60): exact or near-exact match — used for stats
+  //   MID   (score >= 30): partial match — shown but excluded from stats
+  //   LOW   (score <  30): poor match — shown dimmed at bottom
+  const highMatches = soldScored.filter(i => i.relevance >= 60);
+  const midMatches  = soldScored.filter(i => i.relevance >= 30 && i.relevance < 60);
+  const lowMatches  = soldScored.filter(i => i.relevance < 30);
 
-  // Apply date filter
+  // Tag each item
+  const soldTagged = soldScored.map(i => ({
+    ...i,
+    matchTier: i.relevance >= 60 ? 'high' : i.relevance >= 30 ? 'mid' : 'low',
+    fewerWords: i.relevance < 60   // backward compat for existing display code
+  }));
+
+  // Apply date filter to tagged items
   let filteredSold = soldTagged;
   if (filterFrom || filterTo) {
     filteredSold = soldTagged.filter(i => {
@@ -1455,19 +1490,22 @@ function displayResults(query, sold, active, resetPage) {
     });
   }
 
-  // Stats use ONLY primary matches (no fewer-words items)
-  const primarySold   = filteredSold.filter(i => !i.fewerWords);
-  const soldForStats  = primarySold.length > 0 ? primarySold : filteredSold;
-  const fewWordsCount = filteredSold.filter(i => i.fewerWords).length;
+  // Stats from HIGH matches only; fall back to MID, then all
+  const filteredHigh = filteredSold.filter(i => i.matchTier === 'high');
+  const filteredMid  = filteredSold.filter(i => i.matchTier === 'mid');
+  const filteredLow  = filteredSold.filter(i => i.matchTier === 'low');
+  const soldForStats = filteredHigh.length > 0 ? filteredHigh
+                     : filteredMid.length  > 0 ? filteredMid
+                     : filteredSold;
+  const excludedCount = filteredSold.length - soldForStats.length;
 
-  const mergedItems = [...filteredSold, ...active].sort((a,b) => {
-    if (a.sold && !b.sold) return -1;
-    if (!a.sold && b.sold) return  1;
-    return 0;
-  });
-  const listItems = viewMode === 'sold'   ? filteredSold
-                  : viewMode === 'active' ? active
-                  : mergedItems;
+  // List order: high first, then mid, then low (each group sorted by date already)
+  const orderedSold = [...filteredHigh, ...filteredMid, ...filteredLow];
+
+  const mergedItems = [...orderedSold, ...active];
+  const listItems   = viewMode === 'sold'   ? orderedSold
+                    : viewMode === 'active' ? active
+                    : mergedItems;
 
   const allPrices  = soldForStats.map(i => i.price);
   const value      = estimateValue(soldForStats.length ? soldForStats : active);
@@ -1489,14 +1527,19 @@ function displayResults(query, sold, active, resetPage) {
   html += `<div class="section-label">Estimated Value</div>`;
   html += `<div class="value-card">
     <div class="value-pin-name">${escHtml(query)}</div>
-    <div class="value-meta">${soldForStats.length ? `Median of ${soldForStats.length} primary match${soldForStats.length!==1?'es':''}` : `Based on ${active.length} active listing${active.length!==1?'s':''}`}${fewWordsCount>0?` <span style="color:var(--text-faint);font-size:11px">(+${fewWordsCount} partial matches excluded from stats)</span>`:''}${filterFrom||filterTo?' (filtered)':''}</div>
+    <div class="value-meta">
+      ${filteredHigh.length ? `<span style="color:var(--green)">●</span> ${filteredHigh.length} exact match${filteredHigh.length!==1?'es':''}` : ''}
+      ${filteredMid.length  ? `&nbsp;<span style="color:var(--gold)">●</span> ${filteredMid.length} partial` : ''}
+      ${filteredLow.length  ? `&nbsp;<span style="color:var(--text-faint)">●</span> ${filteredLow.length} poor` : ''}
+      ${excludedCount > 0 ? `&nbsp;<span style="color:var(--text-faint);font-size:11px">(stats from ${soldForStats.length} best)</span>` : ''}
+    </div>
     <div class="value-main">
       <div class="value-price">${value ? fmtPrice(value) : '—'}</div>
       <div class="value-label">${soldForStats.length ? 'Median sold' : 'Est. from listings'}</div>
     </div>
     ${minP&&maxP ? `<div class="value-range">Range: <span>${fmtPrice(minP)}</span> — <span>${fmtPrice(maxP)}</span></div>` : ''}
     <div class="confidence-bar-wrap"><div class="confidence-bar" style="width:${confidence}%"></div></div>
-    <div class="confidence-label">Confidence: ${confidence<30?'Low':confidence<70?'Medium':'High'} · ${soldForStats.length} primary sold, ${active.length} listed</div>
+    <div class="confidence-label">Confidence: ${confidence<30?'Low':confidence<70?'Medium':'High'} · ${filteredHigh.length} exact, ${filteredMid.length} partial, ${filteredLow.length} poor</div>
   </div>`;
 
   // ── Stats row ──
@@ -1561,14 +1604,18 @@ function displayResults(query, sold, active, resetPage) {
   }
   pageItems.forEach(item => {
     const isSold    = item.sold;
-    const isFewer   = item.fewerWords;
+    const tier      = item.matchTier || 'high';
+    const opacity   = tier === 'high' ? '1' : tier === 'mid' ? '0.7' : '0.4';
+    const tierBadge = tier === 'mid'  ? ' · <span style="color:var(--gold);font-size:10px">PARTIAL</span>'
+                    : tier === 'low'  ? ' · <span style="color:var(--text-faint);font-size:10px">POOR MATCH</span>'
+                    : '';
     const d         = item.date ? new Date(item.date).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}) : '';
-    const isHigh    = !isFewer && value && item.price > value * 1.4;
-    const isLow     = !isFewer && value && item.price < value * 0.6;
+    const isHigh    = tier === 'high' && value && item.price > value * 1.4;
+    const isLow     = tier === 'high' && value && item.price < value * 0.6;
     const thumb     = item.image || '';
     const mktBadge  = item.marketplace && item.marketplace !== 'EBAY_US'
       ? ` · <span style="color:var(--gold);font-size:10px">${item.marketplace.replace('EBAY_','')}</span>` : '';
-    html += `<div class="listing-row" style="opacity:${isFewer?'0.55':'1'};${item.url?'cursor:pointer':''}" ${item.url?`onclick="window.open('${escAttr(item.url)}','_blank')"`:''}}>
+    html += `<div class="listing-row" style="opacity:${opacity};${item.url?'cursor:pointer':''}" ${item.url?`onclick="window.open('${escAttr(item.url)}','_blank')"`:''}}>
       ${thumb
         ? `<img class="listing-thumb" src="${escHtml(thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'listing-thumb-placeholder',textContent:'📌'}))" />`
         : `<div class="listing-thumb-placeholder">📌</div>`}
@@ -1576,12 +1623,12 @@ function displayResults(query, sold, active, resetPage) {
         <div class="listing-title">${escHtml(item.title.substring(0,55))}</div>
         <div class="listing-date">
           ${isSold ? '<span style="color:var(--green);font-size:10px">SOLD</span>' : '<span style="color:var(--teal);font-size:10px">LISTED</span>'}
-          ${isFewer ? ' · <span style="color:var(--text-faint);font-size:10px">partial match</span>' : ''}
+          ${tierBadge}
           ${d ? ' · '+d : ''}${item.condition?' · '+item.condition:''}${mktBadge}
         </div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex-shrink:0">
-        <div class="listing-price ${isSold?'sold-price':'active-price'}" style="${isFewer?'color:var(--text-dim)':''}">${fmtPrice(item.price)}</div>
+        <div class="listing-price ${isSold?'sold-price':'active-price'}" style="${tier!=='high'?'color:var(--text-dim)':''}">${fmtPrice(item.price)}</div>
         ${isHigh?'<div style="font-size:9px;color:var(--gold);font-family:\'DM Mono\',monospace">HIGH</div>':''}
         ${isLow ?'<div style="font-size:9px;color:var(--teal);font-family:\'DM Mono\',monospace">LOW</div>'  :''}
       </div>
